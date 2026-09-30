@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name" translatable="false">Open Track Camera</string>
+    <string name="view_wide">View: wide</string>
+    <string name="view_output">View: output</string>
+    <string name="auto_lock_on">Auto lock: on</string>
+    <string name="auto_lock_off">Auto lock: off</string>
+    <string name="release_target">Release target</string>
+    <string name="focus_inf_on">Focus: ∞</string>
+    <string name="focus_inf_off">Focus: auto</string>
+    <string name="shutter_fast_on">Shutter: 1/1000</string>
+    <string name="shutter_fast_off">Shutter: auto</string>
+    <string name="detector_hybrid">Detector: hybrid</string>
+    <string name="detector_neural">Detector: neural</string>
+    <string name="detector_sky">Detector: sky</string>
+    <string name="crop_zoom">Crop %.2fx</string>
+    <string name="lens_zoom">Lens %.1fx</string>
+    <string name="ev">EV %+d</string>
+    <string name="state_idle">IDLE</string>
+    <string name="state_tracking">TRACKING</string>
+    <string name="state_coasting">PREDICTING</string>
+    <string name="state_lost">LOST</string>
+    <string name="no_camera">No back camera supports 4K/1080p video streams on this device.</string>
+    <string name="permission_needed">Camera permission is required.</string>
+    <string name="saved">Saved: %s</string>
+    <string name="save_failed">Recording failed</string>
+    <string name="no_neural">Neural detector unavailable, sky detector only</string>
+    <string name="status">%1$s → %2$dx%3$d@%4$d · %5$.0f fps · analysis %6$.1f ms · NN %7$.0f ms · %8$s</string>
+</resources>

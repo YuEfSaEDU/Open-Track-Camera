@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="view_wide">Görünüm: geniş</string>
+    <string name="view_output">Görünüm: çıkış</string>
+    <string name="auto_lock_on">Oto kilit: açık</string>
+    <string name="auto_lock_off">Oto kilit: kapalı</string>
+    <string name="release_target">Hedefi bırak</string>
+    <string name="focus_inf_on">Odak: ∞</string>
+    <string name="focus_inf_off">Odak: otomatik</string>
+    <string name="shutter_fast_on">Enstantane: 1/1000</string>
+    <string name="shutter_fast_off">Enstantane: oto</string>
+    <string name="detector_hybrid">Dedektör: hibrit</string>
+    <string name="detector_neural">Dedektör: sinir ağı</string>
+    <string name="detector_sky">Dedektör: gökyüzü</string>
+    <string name="crop_zoom">Kırpma %.2fx</string>
+    <string name="lens_zoom">Lens %.1fx</string>
+    <string name="ev">EV %+d</string>
+    <string name="state_idle">BEKLİYOR</string>
+    <string name="state_tracking">TAKİPTE</string>
+    <string name="state_coasting">TAHMİN</string>
+    <string name="state_lost">KAYIP</string>
+    <string name="no_camera">Bu cihazda 4K/1080p video akışı destekleyen arka kamera bulunamadı.</string>
+    <string name="permission_needed">Kamera izni gerekli.</string>
+    <string name="saved">Kaydedildi: %s</string>
+    <string name="save_failed">Kayıt başarısız</string>
+    <string name="no_neural">Sinir ağı dedektörü yok, yalnızca gökyüzü dedektörü</string>
+    <string name="status">%1$s → %2$dx%3$d@%4$d · %5$.0f fps · analiz %6$.1f ms · NN %7$.0f ms · %8$s</string>
+</resources>
