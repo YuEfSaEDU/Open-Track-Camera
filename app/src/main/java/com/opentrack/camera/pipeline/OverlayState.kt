@@ -18,6 +18,8 @@ data class OverlayState(
     val sourceHeight: Int,
     val previewMode: PreviewMode,
     val crop: CropWindow,
+    /** Current digital zoom (changes on its own in auto zoom mode). */
+    val zoom: Double,
     val trackState: TrackState,
     val target: Box?,
     val detections: List<Detection>,

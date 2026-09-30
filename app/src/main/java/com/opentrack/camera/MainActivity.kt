@@ -36,6 +36,7 @@ import com.opentrack.tracking.GyroMotionModel
 import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackState
 import com.opentrack.tracking.TrackerConfig
+import com.opentrack.tracking.ZoomConfig
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
@@ -56,6 +57,7 @@ class MainActivity : AppCompatActivity() {
 
     private var settings = CameraSettings()
     private var cropZoom = 2.0
+    private var zoomConfig = ZoomConfig(auto = true, minZoom = 1.0, maxZoom = 3.0)
     private var previewMode = PreviewMode.WIDE
     private var autoLock = true
     private var detectorMode = AnalysisEngine.Mode.HYBRID
@@ -115,6 +117,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.shutter).setOnClickListener {
             updateSettings(settings.copy(shutterPriority = !settings.shutterPriority))
         }
+        findViewById<Button>(R.id.autoZoom).setOnClickListener {
+            updateZoomConfig(zoomConfig.copy(auto = !zoomConfig.auto))
+        }
         refreshButtons()
 
         if (!hasPermission(Manifest.permission.CAMERA)) {
@@ -166,8 +171,7 @@ class MainActivity : AppCompatActivity() {
         // Base clock offset camera → gyro (SensorEvent timestamps use elapsedRealtimeNanos).
         val clockOffsetNs = if (p.timestampRealtime) 0L else SystemClock.elapsedRealtimeNanos() - System.nanoTime()
 
-        // Without gyro, hand shake shows up as target motion: the filter must be more agile.
-        val tracker = TargetTracker(motion, TrackerConfig(accelNoise = if (g.available) 1.5e6 else 8e6, autoAcquire = autoLock))
+        val tracker = TargetTracker(motion, TrackerConfig.forSource(srcW, hasGyro = g.available).copy(autoAcquire = autoLock))
         val detector = AircraftDetector.create(this)
         if (detector == null) Toast.makeText(this, R.string.no_neural, Toast.LENGTH_SHORT).show()
 
@@ -176,7 +180,10 @@ class MainActivity : AppCompatActivity() {
         val engine = AnalysisEngine(tracker, detector, analysisW, analysisH, srcW.toDouble() / analysisW).also { it.mode = detectorMode }
         analysis = engine
 
-        val framing = FramingController(srcW, srcH, outputWidth.toDouble() / outputHeight, motion).also { it.zoom = cropZoom }
+        val framing = FramingController(srcW, srcH, outputWidth.toDouble() / outputHeight, motion).also {
+            it.zoom = cropZoom
+            it.zoomConfig = zoomConfig
+        }
         val rp = RenderPipeline(p, motion, tracker, engine, framing, rotationQuarter, object : RenderPipeline.Listener {
             override fun onCameraSurface(surface: Surface) {
                 runOnUiThread { openCamera(p, surface, model, clockOffsetNs) }
@@ -242,10 +249,39 @@ class MainActivity : AppCompatActivity() {
         crop.max = 60
         crop.progress = ((cropZoom - 1.0) / 0.05).roundToInt()
         cropLabel.text = getString(R.string.crop_zoom, cropZoom)
+        crop.isEnabled = !zoomConfig.auto
         crop.setOnSeekBarChangeListener(onChange { v ->
             cropZoom = 1.0 + v * 0.05
             pipeline?.framing?.zoom = cropZoom
             cropLabel.text = getString(R.string.crop_zoom, cropZoom)
+        })
+
+        // Auto zoom limits, same 1.0x … 4.0x scale as the crop zoom.
+        val autoMinBar = findViewById<SeekBar>(R.id.zoomMin)
+        val autoMaxBar = findViewById<SeekBar>(R.id.zoomMax)
+        val autoMinLabel = findViewById<TextView>(R.id.zoomMinLabel)
+        val autoMaxLabel = findViewById<TextView>(R.id.zoomMaxLabel)
+        val native = FramingController.nativeZoom(p.sourceSize.width, outputWidth)
+        fun label(v: Double) = getString(if (v > native + 1e-6) R.string.zoom_limit_upscaled else R.string.zoom_limit, v)
+        for (bar in listOf(autoMinBar, autoMaxBar)) bar.max = 60
+        autoMinBar.progress = ((zoomConfig.minZoom - 1.0) / 0.05).roundToInt()
+        autoMaxBar.progress = ((zoomConfig.maxZoom - 1.0) / 0.05).roundToInt()
+        autoMinLabel.text = getString(R.string.zoom_min, label(zoomConfig.minZoom))
+        autoMaxLabel.text = getString(R.string.zoom_max, label(zoomConfig.maxZoom))
+        autoMinBar.setOnSeekBarChangeListener(onChange { v ->
+            val z = 1.0 + v * 0.05
+            // Keep min <= max by pushing the other limit.
+            if (z > zoomConfig.maxZoom) autoMaxBar.progress = v
+            updateZoomConfig(zoomConfig.copy(minZoom = z, maxZoom = maxOf(z, zoomConfig.maxZoom)))
+            autoMinLabel.text = getString(R.string.zoom_min, label(z))
+            autoMaxLabel.text = getString(R.string.zoom_max, label(zoomConfig.maxZoom))
+        })
+        autoMaxBar.setOnSeekBarChangeListener(onChange { v ->
+            val z = 1.0 + v * 0.05
+            if (z < zoomConfig.minZoom) autoMinBar.progress = v
+            updateZoomConfig(zoomConfig.copy(maxZoom = z, minZoom = minOf(z, zoomConfig.minZoom)))
+            autoMaxLabel.text = getString(R.string.zoom_max, label(z))
+            autoMinLabel.text = getString(R.string.zoom_min, label(zoomConfig.minZoom))
         })
 
         val lens = findViewById<SeekBar>(R.id.lensZoom)
@@ -271,6 +307,22 @@ class MainActivity : AppCompatActivity() {
             evLabel.text = getString(R.string.ev, evMin + v)
             updateSettings(settings.copy(aeCompensation = evMin + v))
         })
+    }
+
+    private fun updateZoomConfig(c: ZoomConfig) {
+        val wasAuto = zoomConfig.auto
+        zoomConfig = c
+        pipeline?.framing?.let { f ->
+            // Leaving auto mode keeps the current zoom as the new manual value.
+            if (wasAuto && !c.auto) cropZoom = f.zoom
+            f.zoomConfig = c
+            if (!c.auto) f.zoom = cropZoom
+        }
+        val crop = findViewById<SeekBar>(R.id.cropZoom)
+        crop.isEnabled = !c.auto
+        crop.progress = ((cropZoom - 1.0) / 0.05).roundToInt()
+        findViewById<TextView>(R.id.cropZoomLabel).text = getString(R.string.crop_zoom, cropZoom)
+        refreshButtons()
     }
 
     private fun onChange(block: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
@@ -331,6 +383,10 @@ class MainActivity : AppCompatActivity() {
             },
         )
         status.text = getString(R.string.status, p.label, outputWidth, outputHeight, p.fps, s.fps, s.analysisMs, s.neuralMs, stateText)
+        if (zoomConfig.auto) {
+            findViewById<TextView>(R.id.cropZoomLabel).text = getString(R.string.crop_zoom, s.zoom)
+            findViewById<SeekBar>(R.id.cropZoom).progress = ((s.zoom - 1.0) / 0.05).roundToInt()
+        }
     }
 
     private fun refreshButtons() {
@@ -345,6 +401,7 @@ class MainActivity : AppCompatActivity() {
         )
         findViewById<Button>(R.id.focus).setText(if (settings.focusInfinity) R.string.focus_inf_on else R.string.focus_inf_off)
         findViewById<Button>(R.id.shutter).setText(if (settings.shutterPriority) R.string.shutter_fast_on else R.string.shutter_fast_off)
+        findViewById<Button>(R.id.autoZoom).setText(if (zoomConfig.auto) R.string.auto_zoom_on else R.string.auto_zoom_off)
     }
 
     private fun hasPermission(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED

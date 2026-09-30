@@ -18,3 +18,4 @@ rootProject.name = "OpenTrackCamera"
 
 include(":app")
 include(":tracking")
+include(":bench")

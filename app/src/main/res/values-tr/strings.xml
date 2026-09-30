@@ -13,6 +13,10 @@
     <string name="detector_neural">Dedektör: sinir ağı</string>
     <string name="detector_sky">Dedektör: gökyüzü</string>
     <string name="crop_zoom">Kırpma %.2fx</string>
+    <string name="auto_zoom_on">Oto zoom: açık</string>
+    <string name="auto_zoom_off">Oto zoom: kapalı</string>
+    <string name="zoom_min">Min %s</string>
+    <string name="zoom_max">Maks %s</string>
     <string name="lens_zoom">Lens %.1fx</string>
     <string name="ev">EV %+d</string>
     <string name="state_idle">BEKLİYOR</string>

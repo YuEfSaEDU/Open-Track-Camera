@@ -142,13 +142,15 @@ class SkyBlobDetector(
     private fun ringStd(ii: LongArray, iiSq: LongArray, w: Int, h: Int, x0: Int, y0: Int, x1: Int, y1: Int): Double {
         val bw = x1 - x0
         val bh = y1 - y0
-        fun expand(k: Double): IntArray {
-            val ex = (bw * (k - 1) / 2).toInt() + 2
-            val ey = (bh * (k - 1) / 2).toInt() + 2
+        fun expand(k: Double, minMargin: Int): IntArray {
+            val ex = max((bw * (k - 1) / 2).toInt() + 2, minMargin)
+            val ey = max((bh * (k - 1) / 2).toInt() + 2, minMargin)
             return intArrayOf(max(0, x0 - ex), max(0, y0 - ey), min(w, x1 + ex), min(h, y1 + ey))
         }
-        val inner = expand(2.0)
-        val outer = expand(3.0)
+        val inner = expand(2.0, 0)
+        // The ring must cover at least the background window: if that window is not smooth
+        // (e.g. next to a glare streak or a cloud edge) the contrast estimate is meaningless.
+        val outer = expand(3.0, backgroundRadius)
         val sum = rectSum(ii, w, outer[0], outer[1], outer[2], outer[3]) - rectSum(ii, w, inner[0], inner[1], inner[2], inner[3])
         val sumSq = rectSum(iiSq, w, outer[0], outer[1], outer[2], outer[3]) - rectSum(iiSq, w, inner[0], inner[1], inner[2], inner[3])
         val count = (outer[2] - outer[0]) * (outer[3] - outer[1]) - (inner[2] - inner[0]) * (inner[3] - inner[1])

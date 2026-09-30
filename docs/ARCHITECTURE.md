@@ -67,6 +67,20 @@ frekanslı ve fiziksel olarak düzgündür. Bu yüzden ikisi ayrılır:
 Jiroskop yoksa `CameraMotion.NONE` kullanılır ve Kalman'ın süreç gürültüsü artırılır (titreme
 hedef hareketi gibi görünür, yay ile yumuşatılır).
 
+## Otomatik zoom (`AutoZoom`)
+
+Kırpma zumu, kullanıcının belirlediği `[minZoom, maxZoom]` aralığında kendiliğinden değişir:
+
+- **Hedef boyutu sabit**: istenen zoom = `targetFill × kaynakGenişliği / hedefBoyutu` (varsayılan
+  hedefin uzun kenarı kırpma genişliğinin %25'i). Boyut tespitlerden (EMA) gelir.
+- **Güvenlik için genişleme**: takipçi yalnızca tahmin ediyorsa (COASTING) saniyede ~%45, hedef kırpma
+  merkezinden yarı-boyutun %30'undan fazla uzaklaşırsa ayrıca genişler. Hedef yoksa en geniş sınıra
+  döner; böylece yeniden yakalama kolaylaşır.
+- **Nefes almayı önleme**: log-uzayında çalışır, ±%12 ölü bölge ve histerezis vardır; zoom-in en fazla
+  0.45 ln/s, zoom-out 1.2 ln/s (hedefi kaçırmak gevşek kadrajdan daha kötüdür).
+- Lens zumu (telefoto geçişi) otomatik değildir: fiziksel kamera değişimi kayıtta sıçrama yapar.
+- `nativeZoom` (4K→1080p için 2x) üstü dijital büyütmedir; arayüz bu değerleri ⚠ ile işaretler.
+
 ## Tespit ve takip
 
 `TargetTracker` durum makinesi: `IDLE → TRACKING ⇄ COASTING → LOST → (yeniden yakalama | IDLE)`.
@@ -80,6 +94,18 @@ hedef hareketi gibi görünür, yay ile yumuşatılır).
 - **Otomatik kilit**: `IDLE` iken en iyi tespit (sinir ağı tespitleri öncelikli).
 - **Dokunarak seçim**: dokunulan noktadaki tespit kutusu, yoksa 160 px'lik varsayılan kutu.
 
+Yanlış kilitlenmeye karşı korumalar (gerçek videolarda bulunan hatalardan):
+
+- **Çapa şablonu**: kendini güncelleyen şablonun yanında, son tespit onayında alınmış sabit bir
+  "çapa" tutulur. Eşleşme çapaya da benzemeli (NCC ≥ 0.45); aksi halde şablon kayması sayılır.
+- **Kontrast kontrolü**: NCC kontrastı yok saydığından silikleşen hedef veya düz, gürültülü gökyüzü
+  yüksek skor alabilir. Eşleşen yamanın kontrastı çapanın ≥ %45'i ve ≥ 2.5 gri seviye olmalı.
+- **Tutarlı onay**: tespit, çapayı yalnızca şablon eşleşmesiyle aynı yerdeyse yeniler; çelişen bir
+  gökyüzü blob'u takibi değiştiremez (parlama/bulut kenarı), yalnızca sinir ağı düzeltebilir.
+- **Boyut uyumu**: ilişkilendirilen tespit, hedef boyutunun 1/2.5–2.5 katı (sinir ağı 1/4–4) olmalı.
+- **Çözünürlükten bağımsız parametreler** (`TrackerConfig.forSource`) ve kare genişliğinin %20'si ile
+  sınırlı kapı: tahmin modunda kapı tüm kareye yayılıp rastgele blob'lara atlamaz.
+
 ### Gökyüzü dedektörü (`SkyBlobDetector`)
 
 Uzaktaki bir uçak 4K karede birkaç piksel olabilir; 640x360'a (ve modelin 320x320 girişine)
@@ -88,7 +114,9 @@ küçültülünce sinir ağı onu göremez. Oysa düz gökyüzünde çok belirgi
 1. 25x25 kutu ortalamasıyla yerel arka plan, fark görüntüsü.
 2. Eşik = max(14, 6 × 1.4826 × MAD) — gürültüye göre uyarlanır.
 3. Aynı işaretli pikseller için 8-bağlantılı bölge büyütme; alan ve doluluk filtreleri.
-4. Blob'un 2x–3x çevresindeki halkanın standart sapması ≤ 9 olmalı ("burası gökyüzü").
+4. Blob'un 2x–3x çevresindeki (en az arka plan penceresi kadar geniş) halkanın standart sapması
+   ≤ 9 olmalı ("burası gökyüzü"). Pencere düz değilse (parlama şeridi, bulut kenarı) kontrast
+   kestirimi güvenilmezdir.
    Ağaç, bina, kablo gibi dokulu bölgeler böylece elenir.
 
 GPU tarafındaki 3x3 kutu filtre, 6x küçültmede tek piksellik hedeflerin örnekleme aralığına düşüp
@@ -101,6 +129,36 @@ kaybolmasını engeller.
 - `MuxerSink` tüm izlerin formatı gelene kadar örnekleri tamponlar (ilk anahtar kare kaybolmaz),
   zamanları `CLOCK_MONOTONIC`'e çevirip ilk video karesine göre sıfırlar.
 - Dosya `MediaStore` üzerinden `Movies/OpenTrack/OTC_yyyyMMdd_HHmmss.mp4` olarak yazılır.
+
+## Gerçek video testleri
+
+`tools/video_bench/run_bench.py` ile açık lisanslı 6 hava gösterisi videosu (Wikimedia Commons ve
+archive.org, CC lisanslı; depoya eklenmedi) uygulamadaki Kotlin takip kodu + aynı MediaPipe modeliyle
+oynatıldı. Otomatik zoom açık (1x–3x). Videolarda jiroskop verisi yok; yani en zor durum ölçüldü.
+"Sinir ağıyla uyum": sinir ağının uçak bulduğu karelerde takip merkezinin o kutunun içinde olma oranı
+(zayıf bir referans; sinir ağı küçük uçakları göremez).
+
+| Video | Çözünürlük | Süre (s) | Takipte | Tahmin | Kayıp | Sinir ağıyla uyum | Hedef kırpmada | Zoom | ms/kare |
+|---|---|---|---|---|---|---|---|---|---|
+| Bournemouth Air Festival 2012 (Red Arrows) | 1920x1080@25 | 60 | 76% | 23% | 1% | 64% | 87% | 1.0–3.0 | 1.3 |
+| F-18C Hornet, Turku Airshow 2015 | 1920x1080@25 | 60 | 93% | 7% | 0% | 90% | 95% | 1.0–3.0 | 1.3 |
+| F-22 Raptor, Jones Beach 2012 | 640x480@30 | 20 | 91% | 9% | 0% | – | 98% | 1.0–3.0 | 1.0 |
+| Jim Parker Airshow 2011 | 1280x720@30 | 16 | 75% | 22% | 3% | 84% | 93% | 1.0–3.0 | 2.0 |
+| Red Arrows in Action | 640x480@30 | 59 | 45% | 34% | 20% | 17% | 78% | 1.0–3.0 | 1.2 |
+| Wings Over Georgia 2014 | 1920x1080@25 | 23 | 84% | 15% | 0% | 92% | 95% | 1.2–3.0 | 1.3 |
+
+Bu testlerde bulunup düzeltilen hatalar: şablon kayması (silikleşen hedefte boş gökyüzüne kilit),
+çözünürlüğe bağlı süreç gürültüsü (640 px videoda kapı tüm kareyi kaplıyordu), parlama şeridi yanında
+sahte gökyüzü blob'ları, çapanın tespit kutusu merkezinden alınması (büyük uçaklarda doğru eşleşmeler
+reddediliyordu), kayıptan yeniden yakalamanın 8 s beklemesi ve lens toz lekesine kalıcı kilit
+(sinir ağı geçersiz kılma kuralı). Örnek: F-18 videosunda sinir ağıyla uyum %0'dan %90'a çıktı.
+
+Bilinen sınırlamalar:
+- Red Arrows (480p ev kamerası) videosunda uçaklar çoğu zaman görünmüyor; takipçi zaman zaman duman
+  bulutlarına veya seyircilerin düz yüzeylerine (gökyüzü dedektörü) kilitleniyor.
+- Kol uçuşunda (birden çok uçak) hedef uçaktan uçağa geçebiliyor; çoklu hedef takibi yok.
+- Büyük hedeflerde şablon (en fazla 41x41 analiz pikseli) uçağın merkez kısmını izler; kutu uçağa göre
+  biraz kayık görünebilir, kadraj yine de uçağı merkezde tutar.
 
 ## Cihazda doğrulama listesi
 

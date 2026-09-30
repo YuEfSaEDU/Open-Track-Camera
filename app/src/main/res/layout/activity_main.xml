@@ -49,6 +49,16 @@
         </LinearLayout>
 
         <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:gravity="center_vertical">
+            <TextView android:id="@+id/zoomMinLabel" style="@style/ControlLabel" />
+            <SeekBar android:id="@+id/zoomMin" android:layout_width="220dp" android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:gravity="center_vertical">
+            <TextView android:id="@+id/zoomMaxLabel" style="@style/ControlLabel" />
+            <SeekBar android:id="@+id/zoomMax" android:layout_width="220dp" android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:gravity="center_vertical">
             <TextView android:id="@+id/lensZoomLabel" style="@style/ControlLabel" />
             <SeekBar android:id="@+id/lensZoom" android:layout_width="220dp" android:layout_height="wrap_content" />
         </LinearLayout>
@@ -83,6 +93,7 @@
 
             <Button android:id="@+id/viewMode" style="@style/ControlToggle" />
             <Button android:id="@+id/autoLock" style="@style/ControlToggle" />
+            <Button android:id="@+id/autoZoom" style="@style/ControlToggle" />
             <Button android:id="@+id/releaseTarget" style="@style/ControlToggle" android:text="@string/release_target" />
             <Button android:id="@+id/detector" style="@style/ControlToggle" />
             <Button android:id="@+id/focus" style="@style/ControlToggle" />

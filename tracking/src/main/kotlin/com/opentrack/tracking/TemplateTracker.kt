@@ -19,10 +19,21 @@ class TemplateTracker(
     /** Template blend rate when a match is confident. */
     private val adaptRate: Float = 0.08f,
     private val adaptMinScore: Double = 0.82,
+    /** The adaptive template is only updated while it still resembles the anchor this much. */
+    private val adaptMinAnchorScore: Double = 0.7,
 ) {
-    data class Match(val center: Vec2, val score: Double)
+    /**
+     * @param score NCC against the adaptive template
+     * @param anchorScore NCC of the same position against the anchor template (the
+     *   appearance when the track was seeded from a detection); guards against drift.
+     * @param contrast std-dev (gray levels) of the matched patch
+     * @param contrastRatio [contrast] / anchor std-dev. NCC ignores contrast, so a faded
+     *   target and flat noisy sky can still score high; this catches it.
+     */
+    data class Match(val center: Vec2, val score: Double, val anchorScore: Double, val contrast: Double, val contrastRatio: Double)
 
     private var template = FloatArray(0)
+    private var anchor = FloatArray(0)
     private var tw = 0
     private var th = 0
 
@@ -37,12 +48,20 @@ class TemplateTracker(
         th = oddClamp(box.height * contextScale)
         template = FloatArray(tw * th)
         extract(frame, box.cx.roundToInt(), box.cy.roundToInt(), template)
+        anchor = template.copyOf()
+    }
+
+    /** Refreshes the anchor at [center] (analysis px), e.g. when a detection confirms the track. */
+    fun reanchor(frame: LumaFrame, center: Vec2) {
+        if (!isInitialized) return
+        extract(frame, center.x.roundToInt(), center.y.roundToInt(), anchor)
     }
 
     fun reset() {
         tw = 0
         th = 0
         template = FloatArray(0)
+        anchor = FloatArray(0)
     }
 
     /**
@@ -61,14 +80,7 @@ class TemplateTracker(
         val y1 = min(frame.height - 1 - hh, py + radius)
         if (x0 > x1 || y0 > y1) return null
 
-        var tMean = 0.0
-        for (v in template) tMean += v
-        tMean /= template.size
-        var tVar = 0.0
-        for (v in template) tVar += (v - tMean) * (v - tMean)
-        if (tVar < 1e-6) return null
-        val tNorm = sqrt(tVar)
-        val tz = FloatArray(template.size) { (template[it] - tMean).toFloat() }
+        val (tz, tNorm) = zeroMean(template) ?: return null
 
         // Coarse pass on a 2px grid, then a dense pass around the best coarse hit.
         val step = if (radius > 6) 2 else 1
@@ -104,8 +116,42 @@ class TemplateTracker(
             sy += parabolicPeak(ncc(frame, bx, by - 1, tz, tNorm), best, ncc(frame, bx, by + 1, tz, tNorm))
         }
 
-        if (best >= adaptMinScore) adapt(frame, bx, by)
-        return Match(Vec2(sx, sy), best)
+        val anchorZm = zeroMean(anchor)
+        val anchorScore = anchorZm?.let { (az, aNorm) -> ncc(frame, bx, by, az, aNorm) } ?: 0.0
+        val n = template.size
+        val contrast = patchStd(frame, bx, by)
+        val anchorStd = anchorZm?.let { it.second / sqrt(n.toDouble()) } ?: 0.0
+        val ratio = if (anchorStd > 1e-6) contrast / anchorStd else 0.0
+        if (best >= adaptMinScore && anchorScore >= adaptMinAnchorScore && ratio > 0.6) adapt(frame, bx, by)
+        return Match(Vec2(sx, sy), best, anchorScore, contrast, ratio)
+    }
+
+    private fun patchStd(frame: LumaFrame, cx: Int, cy: Int): Double {
+        val left = cx - tw / 2
+        val top = cy - th / 2
+        var sum = 0.0
+        var sumSq = 0.0
+        for (row in 0 until th) {
+            var idx = (top + row) * frame.width + left
+            for (col in 0 until tw) {
+                val v = (frame.data[idx++].toInt() and 0xFF).toDouble()
+                sum += v
+                sumSq += v * v
+            }
+        }
+        val n = (tw * th).toDouble()
+        val mean = sum / n
+        return sqrt(max(0.0, sumSq / n - mean * mean))
+    }
+
+    private fun zeroMean(t: FloatArray): Pair<FloatArray, Double>? {
+        var mean = 0.0
+        for (v in t) mean += v
+        mean /= t.size
+        var variance = 0.0
+        for (v in t) variance += (v - mean) * (v - mean)
+        if (variance < 1e-6) return null
+        return FloatArray(t.size) { (t[it] - mean).toFloat() } to sqrt(variance)
     }
 
     private fun ncc(frame: LumaFrame, cx: Int, cy: Int, tz: FloatArray, tNorm: Double): Double {

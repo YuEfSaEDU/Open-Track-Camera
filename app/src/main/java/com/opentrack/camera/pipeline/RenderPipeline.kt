@@ -205,7 +205,7 @@ class RenderPipeline(
             d.copy(box = d.box.movedTo(c))
         }
         listener.onOverlay(
-            OverlayState(srcW, srcH, previewMode, crop, prediction.state, target, dets, fps, analysis.lastAnalysisMs, analysis.lastNeuralMs),
+            OverlayState(srcW, srcH, previewMode, crop, framing.zoom, prediction.state, target, dets, fps, analysis.lastAnalysisMs, analysis.lastNeuralMs),
         )
     }
 

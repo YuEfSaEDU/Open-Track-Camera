@@ -31,6 +31,9 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   yumuşak hareket eder. Hedef yokken aynı sistem normal elektronik stabilizasyon (EIS) gibi çalışır.
 - **Uçak fotoğrafçılığı ayarları**: sonsuza sabit odak (gökyüzünde AF aramasını önler), EV,
   hızlı enstantane (≈1/1000 s, ISO otomatik türetilir), OIS açık / kamera EIS kapalı.
+- **Otomatik zoom**: kullanıcının belirlediği min/max sınırlar içinde hedefi çıkışta sabit boyutta
+  tutar; hedef yalnızca tahminle izlenirken veya kadrajın kenarına kayarken genişler, hedef yokken
+  en geniş sınıra döner (yeniden yakalamak için). Ölü bölge ve hız sınırlarıyla "nefes alma" yapmaz.
 - **Kayıt**: donanım H.264 (isteğe bağlı HEVC) 40 Mbps + AAC ses, `Movies/OpenTrack` klasörüne.
 - **Arayüz**: Geniş görünüm (tüm sensör + kırpma çerçevesi) / Çıkış görünümü (kaydedilen görüntü),
   dokunarak hedef seçme, otomatik kilit.
@@ -47,11 +50,24 @@ Gereksinimler: JDK 17+, Android SDK (platform 35). Tespit modeli ilk derlemede o
 Minimum Android 11 (API 30). 4K60 için cihazın arka kamerasının `SurfaceTexture` çıkışında
 3840x2160@60 desteklemesi gerekir; yoksa sırayla 4K30, 1440p60, 1080p60, 1080p30 denenir.
 
+## Gerçek videolarda test
+
+```bash
+pip install imageio-ffmpeg numpy pillow mediapipe
+./gradlew :bench:installDist
+python3 tools/video_bench/run_bench.py video1.mp4 video2.webm --out bench_out --auto-zoom --zoom-min 1 --zoom-max 3
+```
+
+Her video için `bench_out/` altında takip CSV'si, metrikler (`summary.json`), sol tarafı geniş görünüm
+(beyaz: kırpma, yeşil: hedef, mavi: sinir ağı) ve sağ tarafı kaydedilecek çıkış olan bir `.mp4` ile
+kare kolajı üretilir. Kayıtlı videolarda jiroskop verisi olmadığından bu test jiroskopsuz yolu ölçer.
+
 ## Proje yapısı
 
 | Modül | İçerik |
 |---|---|
 | `tracking/` | Saf Kotlin/JVM: Kalman, NCC takipçi, gökyüzü dedektörü, jiroskop hareket modeli, kadraj kontrolcüsü. Cihazsız test edilir. |
+| `bench/` + `tools/video_bench/` | Gerçek videolarda test: aynı Kotlin takip kodu + MediaPipe dedektörü, metrikler ve yan yana karşılaştırma videosu. |
 | `app/` | Android: Camera2, OpenGL ES render hattı, MediaPipe dedektörü, MediaCodec/MediaMuxer kayıt, arayüz. |
 
 Ayrıntılı tasarım, koordinat sistemleri ve yol haritası: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

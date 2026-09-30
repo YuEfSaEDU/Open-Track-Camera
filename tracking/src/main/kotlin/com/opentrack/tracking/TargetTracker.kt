@@ -28,6 +28,8 @@ data class TrackPrediction(
     val width: Double,
     val height: Double,
     val confidence: Double,
+    /** Time of the last actual measurement (template match or detection). */
+    val lastMeasuredNs: Long = timestampNs,
 ) {
     val hasTarget: Boolean get() = state == TrackState.TRACKING || state == TrackState.COASTING
 
@@ -51,12 +53,23 @@ data class TrackerConfig(
     /** Std-dev of a detection measurement as a fraction of the object size. */
     val detectionStdFraction: Double = 0.15,
     val minMatchScore: Double = 0.55,
+    /** A match must also resemble the detection-seeded anchor template this much. */
+    val minAnchorScore: Double = 0.45,
+    /** Matched patch contrast relative to the anchor template, and absolute minimum (gray levels). */
+    val minContrastRatio: Double = 0.45,
+    val minContrast: Double = 2.5,
     /** Match score below which the template is re-seeded from an associated detection. */
     val reseedScore: Double = 0.75,
     val minSearchRadius: Int = 6,
     val maxSearchRadius: Int = 48,
     val maxCoastNs: Long = 1_200_000_000L,
     val lostTimeoutNs: Long = 8_000_000_000L,
+    /** Switch to a neural aircraft after this many consecutive neural results disagreeing with the track... */
+    val neuralOverrideCount: Int = 4,
+    /** ...and no neural confirmation of the track for this long. */
+    val neuralOverrideNs: Long = 1_500_000_000L,
+    /** With auto lock on, a lost track may jump to any detection after this long. */
+    val reacquireAnywhereNs: Long = 1_000_000_000L,
     /** Automatically lock onto the best detection while idle / lost. */
     val autoAcquire: Boolean = true,
     /** Allow sky-blob detections (not just neural ones) to start a new track. */
@@ -64,7 +77,31 @@ data class TrackerConfig(
     /** Size of the box used when the user taps on something no detector reported, source px. */
     val defaultTapBoxPx: Double = 160.0,
     val sizeSmoothing: Double = 0.2,
-)
+    /** How fast the re-acquisition gate grows while the target is unseen, source px/s. */
+    val gateGrowthPxPerS: Double = 400.0,
+    /** Allowed size ratio between an associated detection and the tracked object. */
+    val skySizeTolerance: Double = 2.5,
+    val neuralSizeTolerance: Double = 4.0,
+    /** Upper bound of the association gate as a fraction of the frame width. */
+    val maxGateFraction: Double = 0.2,
+) {
+    companion object {
+        /**
+         * Pixel-valued defaults are tuned for a 3840 px wide source; this scales them to
+         * [sourceWidth]. Without a gyro, hand shake appears as target motion, so the motion
+         * model must be more agile.
+         */
+        fun forSource(sourceWidth: Int, hasGyro: Boolean): TrackerConfig {
+            val k = sourceWidth / 3840.0
+            val base = TrackerConfig()
+            return base.copy(
+                accelNoise = (if (hasGyro) 1.5e6 else 8e6) * k * k,
+                defaultTapBoxPx = base.defaultTapBoxPx * k,
+                gateGrowthPxPerS = base.gateGrowthPxPerS * k,
+            )
+        }
+    }
+}
 
 /**
  * Single-target tracker. Combines a per-frame NCC template tracker (fast, precise, drifts
@@ -87,6 +124,12 @@ class TargetTracker(
     var latestDetections: List<Detection> = emptyList()
         private set
 
+    /** Diagnostics of the last processed frame (template match and what updated the track). */
+    var lastMatch: TemplateTracker.Match? = null
+        private set
+    var lastEvent: String = ""
+        private set
+
     private val fx = KalmanCv1D(config.accelNoise)
     private val fy = KalmanCv1D(config.accelNoise)
     private val template = TemplateTracker()
@@ -98,6 +141,10 @@ class TargetTracker(
     private var confidence = 0.0
     private var pendingTap: Vec2? = null
     private var pendingClear = false
+    private var frameWidthPx = 3840.0
+    private var userSelected = false
+    private var neuralDisagreements = 0
+    private var lastNeuralConfirmNs = Long.MIN_VALUE / 2
 
     /** Requests a target at [point] (image source px, on the latest frame). Applied on the next frame. */
     fun selectAt(point: Vec2) {
@@ -110,6 +157,7 @@ class TargetTracker(
 
     fun process(frame: LumaFrame, detections: List<Detection>): TrackPrediction {
         val t = frame.timestampNs
+        frameWidthPx = frame.width * frame.scale
         updateLatestDetections(detections, t)
 
         fx.accelNoise = config.accelNoise
@@ -126,6 +174,7 @@ class TargetTracker(
                 .minByOrNull { (it.box.center - tap).length() }
             val box = det?.let { projectDetection(it, t, null) } ?: Box(tap.x, tap.y, config.defaultTapBoxPx, config.defaultTapBoxPx)
             startTrack(frame, box)
+            userSelected = true
             return publish(t)
         }
 
@@ -134,7 +183,10 @@ class TargetTracker(
             TrackState.TRACKING, TrackState.COASTING -> step(frame, detections)
             TrackState.LOST -> {
                 predictTo(t)
-                if (!acquire(frame, detections, gateFor(t)) && t - lastSeenNs > config.lostTimeoutNs) {
+                // Near the last position first; after a while anything the auto lock would take.
+                val reacquired = acquire(frame, detections, gateFor(t)) ||
+                    (config.autoAcquire && t - lastSeenNs > config.reacquireAnywhereNs && acquire(frame, detections, null))
+                if (!reacquired && t - lastSeenNs > config.lostTimeoutNs) {
                     state = TrackState.IDLE
                     template.reset()
                 }
@@ -159,7 +211,10 @@ class TargetTracker(
         val sigma = sqrt(max(fx.positionVariance, fy.positionVariance)) / s
         val radius = (3 * sigma + 2).roundToInt().coerceIn(config.minSearchRadius, config.maxSearchRadius)
         val match = template.track(frame, predictedImage / s, radius)
-        val measured = match != null && match.score >= config.minMatchScore
+        lastMatch = match
+        lastEvent = if (match == null) "no-match" else "match"
+        val measured = match != null && match.score >= config.minMatchScore && match.anchorScore >= config.minAnchorScore &&
+            match.contrastRatio >= config.minContrastRatio && match.contrast >= config.minContrast
         if (measured) {
             val z = match!!.center * s - offset
             val r = (config.matchStdAnalysisPx * s).let { it * it } / (match.score * match.score)
@@ -175,22 +230,66 @@ class TargetTracker(
         val det = associate(detections, t)
         if (det != null) {
             val box = projectDetection(det, t, Vec2(fx.velocity, fy.velocity))
-            width += (box.width - width) * config.sizeSmoothing
-            height += (box.height - height) * config.sizeSmoothing
-            if (!measured || match!!.score < config.reseedScore) {
+            // Does the detection agree with where the template matched?
+            val consistent = measured && (box.center - match!!.center * s).length() <= max(2 * s, 0.5 * max(box.width, box.height))
+            if (consistent || !measured) {
+                width += (box.width - width) * config.sizeSmoothing
+                height += (box.height - height) * config.sizeSmoothing
+            }
+            if (consistent) {
+                // A detector confirmed the track: refresh the drift anchor where the template is
+                // registered (detection boxes jitter by several pixels; the match does not).
+                template.reanchor(frame, match!!.center)
+                lastEvent = "confirm:${det.source}"
+            }
+            // Re-seed when the template lost the target, or when the neural detector (more
+            // trustworthy than sky blobs, which also fire on cloud edges and glare) disagrees
+            // with a weak match.
+            val reseed = !measured ||
+                (!consistent && det.source == DetectionSource.NEURAL && match!!.score < config.reseedScore)
+            if (reseed) {
                 val z = box.center - offset
                 val r = (config.detectionStdFraction * max(box.width, box.height)).let { it * it }
                 fx.update(z.x, r)
                 fy.update(z.y, r)
                 template.init(frame, box.scaled(1 / s))
+                lastEvent = "reseed:${det.source}"
                 lastSeenNs = t
                 confidence = det.score.toDouble()
                 state = TrackState.TRACKING
             }
         }
 
+        checkNeuralOverride(frame, detections)
+
         if (state == TrackState.TRACKING && lastSeenNs != t) state = TrackState.COASTING
         if (state == TrackState.COASTING && t - lastSeenNs > config.maxCoastNs) state = TrackState.LOST
+    }
+
+    /**
+     * Sky-blob tracks can latch onto non-aircraft (lens dust, a bird, a smoke puff). If the
+     * neural detector keeps reporting an aircraft elsewhere while never confirming the current
+     * track, switch to that aircraft. Only in auto lock mode and never for a user-selected target.
+     */
+    private fun checkNeuralOverride(frame: LumaFrame, detections: List<Detection>) {
+        val neural = detections.filter { it.source == DetectionSource.NEURAL }
+        if (neural.isEmpty()) return
+        val t = frame.timestampNs
+        if (associate(neural, t) != null) {
+            lastNeuralConfirmNs = t
+            neuralDisagreements = 0
+            return
+        }
+        neuralDisagreements++
+        if (config.autoAcquire && !userSelected &&
+            neuralDisagreements >= config.neuralOverrideCount &&
+            t - lastNeuralConfirmNs > config.neuralOverrideNs
+        ) {
+            val best = neural.maxBy { it.score }
+            startTrack(frame, projectDetection(best, t, null))
+            lastNeuralConfirmNs = t
+            lastEvent = "switch:NEURAL"
+        }
     }
 
     /** Picks a detection to (re)start tracking. With [gate] set, only near the extrapolated track. */
@@ -223,6 +322,8 @@ class TargetTracker(
         confidence = 1.0
         template.init(frame, box.scaled(1 / frame.scale))
         state = TrackState.TRACKING
+        userSelected = false
+        neuralDisagreements = 0
     }
 
     /**
@@ -244,15 +345,29 @@ class TargetTracker(
         val offset = motion.offsetAt(t)
         val gate = gateFor(t)
         return detections
+            .filter { sizeCompatible(it) }
             .map { it to (projectDetection(it, t, vel).center - offset - predicted).length() }
             .filter { it.second < gate }
             .minByOrNull { it.second - it.first.score * 10 }?.first
     }
 
+    /**
+     * Rejects detections whose size is implausible for the tracked object (e.g. a glare
+     * streak next to a distant aircraft). Neural boxes vary more, so their tolerance is wider.
+     */
+    private fun sizeCompatible(d: Detection): Boolean {
+        val tracked = max(width, height)
+        if (tracked <= 0) return true
+        val ratio = max(d.box.width, d.box.height) / tracked
+        val tol = if (d.source == DetectionSource.NEURAL) config.neuralSizeTolerance else config.skySizeTolerance
+        return ratio in (1 / tol)..tol
+    }
+
     private fun gateFor(t: Long): Double {
         val sigma = sqrt(max(fx.positionVariance, fy.positionVariance))
         val lostFor = ((t - lastSeenNs) * 1e-9).coerceAtLeast(0.0)
-        return max(width, height) * 1.5 + 3 * sigma + 400.0 * lostFor
+        val gate = max(width, height) * 1.5 + 3 * sigma + config.gateGrowthPxPerS * lostFor
+        return gate.coerceAtMost(max(config.maxGateFraction * frameWidthPx, max(width, height) * 2))
     }
 
     private fun predictTo(t: Long) {
@@ -276,6 +391,7 @@ class TargetTracker(
                 width = width,
                 height = height,
                 confidence = confidence,
+                lastMeasuredNs = lastSeenNs,
             )
         }
         prediction = p

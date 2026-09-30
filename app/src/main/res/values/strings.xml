@@ -14,6 +14,12 @@
     <string name="detector_neural">Detector: neural</string>
     <string name="detector_sky">Detector: sky</string>
     <string name="crop_zoom">Crop %.2fx</string>
+    <string name="auto_zoom_on">Auto zoom: on</string>
+    <string name="auto_zoom_off">Auto zoom: off</string>
+    <string name="zoom_min">Min %s</string>
+    <string name="zoom_max">Max %s</string>
+    <string name="zoom_limit" translatable="false">%.2fx</string>
+    <string name="zoom_limit_upscaled" translatable="false">%.2fx ⚠</string>
     <string name="lens_zoom">Lens %.1fx</string>
     <string name="ev">EV %+d</string>
     <string name="state_idle">IDLE</string>

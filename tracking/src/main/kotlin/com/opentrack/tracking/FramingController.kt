@@ -1,5 +1,6 @@
 package com.opentrack.tracking
 
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
@@ -38,9 +39,24 @@ class FramingController(
     private val motion: CameraMotion,
     var config: FramingConfig = FramingConfig(),
 ) {
-    /** Digital zoom: 1 = widest crop that fits the output aspect; 2 = 1:1 pixels for 4K → 1080p. */
+    /**
+     * Digital zoom: 1 = widest crop that fits the output aspect; 2 = 1:1 pixels for 4K → 1080p.
+     * Set by the user in manual mode; driven by [autoZoom] when [ZoomConfig.auto] is on.
+     */
     @Volatile
     var zoom: Double = 2.0
+
+    val autoZoom = AutoZoom()
+
+    /** Safe to set from any thread. */
+    var zoomConfig: ZoomConfig
+        get() = autoZoom.config
+        set(value) {
+            if (value.auto && !autoZoom.config.auto) autoZoom.reset(zoom)
+            autoZoom.config = value
+        }
+
+    private var lastTargetOffset = 0.0
 
     private var initialized = false
     private var sx = 0.0
@@ -68,6 +84,11 @@ class FramingController(
     }
 
     fun update(timestampNs: Long, track: TrackPrediction): CropWindow {
+        val dtZoom = if (initialized) ((timestampNs - lastNs) * 1e-9).coerceIn(0.0, 0.1) else 0.0
+        if (zoomConfig.auto) {
+            val coastingS = if (track.state == TrackState.COASTING) ((timestampNs - track.lastMeasuredNs) * 1e-9).coerceAtLeast(0.0) else 0.0
+            zoom = autoZoom.update(dtZoom, zoom, track, sourceWidth, outputAspect, coastingS, lastTargetOffset)
+        }
         val (cw, ch) = cropSize()
         val offset = motion.offsetAt(timestampNs)
         val following = track.hasTarget
@@ -110,6 +131,11 @@ class FramingController(
         // Anti wind-up: when clamped, move the virtual camera to where the crop really is.
         if (cx != sx + offset.x) { sx = cx - offset.x; vx = 0.0 }
         if (cy != sy + offset.y) { sy = cy - offset.y; vy = 0.0 }
+
+        lastTargetOffset = if (following) {
+            val t = track.worldAt(timestampNs) + offset
+            max(abs(t.x - cx) / (cw / 2), abs(t.y - cy) / (ch / 2))
+        } else 0.0
         return CropWindow(cx, cy, cw, ch)
     }
 

@@ -9,3 +9,4 @@ captures/
 .cxx/
 # Downloaded at build time by :app:downloadModels
 app/src/main/assets/models/
+bench_out/
