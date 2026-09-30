@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <com.opentrack.camera.ui.AspectRatioFrameLayout
+        android:id="@+id/previewContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:layout_marginEnd="132dp">
+
+        <SurfaceView
+            android:id="@+id/preview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <com.opentrack.camera.ui.OverlayView
+            android:id="@+id/overlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+    </com.opentrack.camera.ui.AspectRatioFrameLayout>
+
+    <TextView
+        android:id="@+id/status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_margin="8dp"
+        android:background="#66000000"
+        android:padding="4dp"
+        android:textColor="#FFFFFF"
+        android:textSize="11sp" />
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="140dp"
+        android:layout_marginBottom="4dp"
+        android:background="#66000000"
+        android:orientation="vertical"
+        android:padding="4dp">
+
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:gravity="center_vertical">
+            <TextView android:id="@+id/cropZoomLabel" style="@style/ControlLabel" />
+            <SeekBar android:id="@+id/cropZoom" android:layout_width="220dp" android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:gravity="center_vertical">
+            <TextView android:id="@+id/zoomMinLabel" style="@style/ControlLabel" />
+            <SeekBar android:id="@+id/zoomMin" android:layout_width="220dp" android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:gravity="center_vertical">
+            <TextView android:id="@+id/zoomMaxLabel" style="@style/ControlLabel" />
+            <SeekBar android:id="@+id/zoomMax" android:layout_width="220dp" android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:gravity="center_vertical">
+            <TextView android:id="@+id/lensZoomLabel" style="@style/ControlLabel" />
+            <SeekBar android:id="@+id/lensZoom" android:layout_width="220dp" android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:gravity="center_vertical">
+            <TextView android:id="@+id/evLabel" style="@style/ControlLabel" />
+            <SeekBar android:id="@+id/ev" android:layout_width="220dp" android:layout_height="wrap_content" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="128dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="end"
+        android:background="#CC101820">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:padding="6dp">
+
+            <Button
+                android:id="@+id/record"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:layout_marginVertical="8dp"
+                android:background="@drawable/record_button"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp" />
+
+            <Button android:id="@+id/viewMode" style="@style/ControlToggle" />
+            <Button android:id="@+id/autoLock" style="@style/ControlToggle" />
+            <Button android:id="@+id/autoZoom" style="@style/ControlToggle" />
+            <Button android:id="@+id/stabilizer" style="@style/ControlToggle" />
+            <Button android:id="@+id/horizon" style="@style/ControlToggle" />
+            <Button android:id="@+id/releaseTarget" style="@style/ControlToggle" android:text="@string/release_target" />
+            <Button android:id="@+id/detector" style="@style/ControlToggle" />
+            <Button android:id="@+id/focus" style="@style/ControlToggle" />
+            <Button android:id="@+id/shutter" style="@style/ControlToggle" />
+        </LinearLayout>
+    </ScrollView>
+</FrameLayout>

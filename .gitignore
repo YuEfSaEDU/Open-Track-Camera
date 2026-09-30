@@ -1,0 +1,13 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+# Downloaded at build time by :app:downloadModels
+app/src/main/assets/models/
+bench_out/
+__pycache__/
