@@ -14,6 +14,7 @@
     <string name="detector_neural">Detector: neural</string>
     <string name="detector_sky">Detector: sky</string>
     <string name="crop_zoom">Crop %.2fx</string>
+    <string name="stab_lock">Stabilizer: lock on aircraft</string>
     <string name="stab_responsive">Stabilizer: responsive</string>
     <string name="stab_balanced">Stabilizer: balanced</string>
     <string name="stab_cinematic">Stabilizer: cinematic</string>

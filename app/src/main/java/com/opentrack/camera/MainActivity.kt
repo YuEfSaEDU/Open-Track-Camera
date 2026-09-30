@@ -60,14 +60,18 @@ class MainActivity : AppCompatActivity() {
     private var settings = CameraSettings()
     private var cropZoom = 2.0
     private var zoomConfig = ZoomConfig(auto = true, minZoom = 1.0, maxZoom = 3.0)
-    private var stabPreset = StabPreset.BALANCED
+    private var stabPreset = StabPreset.LOCK
     private var horizonLock = true
 
-    /** Look-ahead (seconds of delay) and path smoothness presets. */
-    private enum class StabPreset(val lookaheadS: Double, val smoothness: Double, val label: Int) {
-        RESPONSIVE(0.2, 0.4, R.string.stab_responsive),
-        BALANCED(0.33, 0.6, R.string.stab_balanced),
-        CINEMATIC(0.5, 0.8, R.string.stab_cinematic),
+    /**
+     * Look-ahead (seconds of delay), path smoothness, and whether the frame is locked to the
+     * tracking point on the aircraft (point-tracker style) or follows it loosely.
+     */
+    private enum class StabPreset(val lookaheadS: Double, val smoothness: Double, val lock: Boolean, val label: Int) {
+        LOCK(0.33, 0.5, true, R.string.stab_lock),
+        RESPONSIVE(0.2, 0.4, false, R.string.stab_responsive),
+        BALANCED(0.33, 0.6, false, R.string.stab_balanced),
+        CINEMATIC(0.5, 0.8, false, R.string.stab_cinematic),
     }
     private var previewMode = PreviewMode.WIDE
     private var autoLock = true
@@ -332,11 +336,15 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun stabilizerConfig(p: CameraProfile, preset: StabPreset, horizon: Boolean) = StabilizerConfig(
-        delayFrames = (preset.lookaheadS * p.fps).roundToInt(),
-        smoothness = preset.smoothness,
-        rollStabilization = horizon,
-    )
+    private fun stabilizerConfig(p: CameraProfile, preset: StabPreset, horizon: Boolean): StabilizerConfig {
+        val base = StabilizerConfig(
+            delayFrames = (preset.lookaheadS * p.fps).roundToInt(),
+            smoothness = preset.smoothness,
+            rollStabilization = horizon,
+        )
+        // Point lock: the aircraft is pinned near the center, stabilized on its tracking point.
+        return if (preset.lock) base.copy(lockToPoint = true, targetWeight = 20.0, maxTargetOffset = 0.3) else base
+    }
 
     /** Returns false (and tells the user) when the change needs a new look-ahead buffer while recording. */
     private fun applyStabilizer(preset: StabPreset, horizon: Boolean): Boolean {

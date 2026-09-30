@@ -68,7 +68,7 @@ class TemplateTracker(
      * Searches within [radius] analysis pixels of [predicted]. Returns null when the search
      * window falls entirely outside the frame or the template is flat.
      */
-    fun track(frame: LumaFrame, predicted: Vec2, radius: Int): Match? {
+    fun track(frame: LumaFrame, predicted: Vec2, radius: Int, adapt: Boolean = true): Match? {
         if (!isInitialized) return null
         val hw = tw / 2
         val hh = th / 2
@@ -122,8 +122,16 @@ class TemplateTracker(
         val contrast = patchStd(frame, bx, by)
         val anchorStd = anchorZm?.let { it.second / sqrt(n.toDouble()) } ?: 0.0
         val ratio = if (anchorStd > 1e-6) contrast / anchorStd else 0.0
-        if (best >= adaptMinScore && anchorScore >= adaptMinAnchorScore && ratio > 0.6) adapt(frame, bx, by)
-        return Match(Vec2(sx, sy), best, anchorScore, contrast, ratio)
+        val m = Match(Vec2(sx, sy), best, anchorScore, contrast, ratio)
+        if (adapt) adaptTo(frame, m)
+        return m
+    }
+
+    /** Blends the template towards [m]'s location when the match is confident and still anchored. */
+    fun adaptTo(frame: LumaFrame, m: Match) {
+        if (m.score >= adaptMinScore && m.anchorScore >= adaptMinAnchorScore && m.contrastRatio > 0.6) {
+            adapt(frame, m.center.x.roundToInt(), m.center.y.roundToInt())
+        }
     }
 
     private fun patchStd(frame: LumaFrame, cx: Int, cy: Int): Double {

@@ -56,6 +56,7 @@ fun main(args: Array<String>) {
     var trackerConfig = TrackerConfig.forSource(srcW, hasGyro = false)
     a.opt("accel-noise")?.let { trackerConfig = trackerConfig.copy(accelNoise = it.toDouble()) }
     a.opt("min-anchor")?.let { trackerConfig = trackerConfig.copy(minAnchorScore = it.toDouble()) }
+    if (a.flag("image-search")) trackerConfig = trackerConfig.copy(imageSpaceSearch = true)
     val tracker = TargetTracker(motion, trackerConfig)
     val framing = FramingController(srcW, srcH, outW.toDouble() / outH, motion)
     framing.zoom = a.double("zoom", FramingController.nativeZoom(srcW, outW))
@@ -65,6 +66,8 @@ fun main(args: Array<String>) {
             minZoom = a.double("zoom-min", 1.0),
             maxZoom = a.double("zoom-max", 3.0),
             targetFill = a.double("fill", 0.25),
+            offsetWiden = a.double("offset-widen", ZoomConfig().offsetWiden),
+            coastWidenPerS = a.double("coast-widen", ZoomConfig().coastWidenPerS),
         )
     }
     val useLookahead = a.opt("stabilizer") != "old"
@@ -78,6 +81,8 @@ fun main(args: Array<String>) {
         pastFactor = a.double("past-factor", StabilizerConfig().pastFactor),
         constraintWeight = a.double("constraint-weight", StabilizerConfig().constraintWeight),
         robustGoalScale = a.double("robust-goal", StabilizerConfig().robustGoalScale),
+        targetWeight = a.double("target-weight", StabilizerConfig().targetWeight),
+        lockToPoint = a.flag("lock"),
     )
     val framer = LookaheadFramer(srcW, srcH, motion, stabConfig)
     val captureMargin = a.double("capture-margin", 1.25)

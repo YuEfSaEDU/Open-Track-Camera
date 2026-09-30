@@ -40,6 +40,18 @@ data class StabilizerConfig(
     val pastFactor: Double = 2.0,
     /** See [PathSmoother.Weights.constraintWeight]. */
     val constraintWeight: Double = 50.0,
+    /**
+     * Point lock: follow the tracking point as measured on each frame (like a point tracker in
+     * an editor) instead of the Kalman-filtered track. The aircraft then stays pinned in the
+     * frame and hand shake cancels because it is part of the measured position; only the
+     * measurement noise is smoothed, by the look-ahead window.
+     */
+    val lockToPoint: Boolean = false,
+    /**
+     * How strongly the path is pulled to the tracking point (1 = balanced). Higher values lock
+     * the aircraft to the center; the path then inherits the (Kalman-smoothed) aircraft motion.
+     */
+    val targetWeight: Double = 1.0,
     /** Huber scale of the target goal, as a fraction of the crop width (NaN = plain L2). */
     val robustGoalScale: Double = 0.04,
 ) {
@@ -180,13 +192,14 @@ class LookaheadFramer(
             val fHiY = max(wLo.y, wHi.y) / scale
 
             if (t != null && t.hasTarget) {
-                val q = t.worldAt(r.ts)
+                val measured = t.measuredWorld
+                val q = if (c.lockToPoint && measured != null && t.timestampNs == r.ts) measured else t.worldAt(r.ts)
                 var lead = t.velocity * c.leadTimeS
                 val maxLead = c.maxLeadFraction * r.cropW / 2
                 if (lead.length() > maxLead) lead = lead * (maxLead / lead.length())
                 gx[k] = (q.x + lead.x) / scale
                 gy[k] = (q.y + lead.y) / scale
-                a[k] = 1.0
+                a[k] = c.targetWeight
                 val mx = c.maxTargetOffset * r.cropW / 2 / scale
                 val my = c.maxTargetOffset * r.cropH / 2 / scale
                 loX[k] = q.x / scale - mx; hiX[k] = q.x / scale + mx

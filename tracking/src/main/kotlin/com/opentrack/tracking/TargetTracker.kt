@@ -30,6 +30,12 @@ data class TrackPrediction(
     val confidence: Double,
     /** Time of the last actual measurement (template match or detection). */
     val lastMeasuredNs: Long = timestampNs,
+    /**
+     * The tracking point as measured on this very frame (sub-pixel template match, or the
+     * re-seeded point), in world coordinates, before any filtering; null when the frame was
+     * only predicted. Framing can lock to it: this is what a point tracker stabilizes on.
+     */
+    val measuredWorld: Vec2? = null,
 ) {
     val hasTarget: Boolean get() = state == TrackState.TRACKING || state == TrackState.COASTING
 
@@ -82,6 +88,12 @@ data class TrackerConfig(
     /** Allowed size ratio between an associated detection and the tracked object. */
     val skySizeTolerance: Double = 2.5,
     val neuralSizeTolerance: Double = 4.0,
+    /**
+     * Center the template search on the aircraft's image-space motion instead of the world
+     * prediction (useful when the operator pans with the aircraft and the world motion is
+     * large and manoeuvring).
+     */
+    val imageSpaceSearch: Boolean = false,
     /** Upper bound of the association gate as a fraction of the frame width. */
     val maxGateFraction: Double = 0.2,
 ) {
@@ -144,6 +156,14 @@ class TargetTracker(
     private var frameWidthPx = 3840.0
     private var frameCenter = Vec2(1920.0, 1080.0)
     private var userSelected = false
+    private var measurement = Vec2.ZERO
+    private var lastImage = Vec2.ZERO
+    private var lastImageNs = Long.MIN_VALUE
+    private var imageVelocity = Vec2.ZERO
+    private var measurementNs = Long.MIN_VALUE
+    /** Tracking point relative to the detection box center, in units of the box size. */
+    private var pointOffset = Vec2.ZERO
+    private var pointOffsetValid = false
     private var neuralDisagreements = 0
     private var lastNeuralConfirmNs = Long.MIN_VALUE / 2
 
@@ -207,20 +227,45 @@ class TargetTracker(
         val t = frame.timestampNs
         predictTo(t)
         val s = frame.scale
-        val predictedImage = toImage(Vec2(fx.position, fy.position), t)
+        // Without a trustworthy camera pose for this frame (featureless sky), search around the
+        // aircraft's own image-space motion instead of the world prediction.
+        val motionOk = (motion as? MotionReliability)?.isReliableAt(t) ?: true
+        val imageDt = ((t - lastImageNs) * 1e-9).coerceIn(0.0, 0.25)
+        val worldPrediction = toImage(Vec2(fx.position, fy.position), t)
+        val imagePrediction = if (lastImageNs == Long.MIN_VALUE) null else lastImage + imageVelocity * imageDt
 
         val sigma = sqrt(max(fx.positionVariance, fy.positionVariance)) / s
         val radius = (3 * sigma + 2).roundToInt().coerceIn(config.minSearchRadius, config.maxSearchRadius)
-        val match = template.track(frame, predictedImage / s, radius)
+        // Search center: the world prediction, unless the camera pose of this frame is unknown
+        // (then the aircraft's own image motion), or image-space search is forced by config.
+        // A second, fallback search was tried and rejected: it lets a similar-looking patch
+        // (smoke, cloud edges) steal the track.
+        val useImage = imagePrediction != null && (!motionOk || config.imageSpaceSearch)
+        val center = if (useImage) imagePrediction!! else worldPrediction
+        val match = template.track(frame, center / s, radius)
         lastMatch = match
         lastEvent = if (match == null) "no-match" else "match"
-        val measured = match != null && match.score >= config.minMatchScore && match.anchorScore >= config.minAnchorScore &&
-            match.contrastRatio >= config.minContrastRatio && match.contrast >= config.minContrast
+        val measured = isGood(match)
         if (measured) {
-            val z = toWorld(match!!.center * s, t)
+            val image = match!!.center * s
             val r = (config.matchStdAnalysisPx * s).let { it * it } / (match.score * match.score)
+            val correctable = motion as? CorrectableMotion
+            if (!motionOk && correctable != null) {
+                // The aircraft is the only reference: its unexpected image motion is camera motion.
+                // Fix the pose so the aircraft stays on its smooth world path.
+                correctable.correct(t, image - toImage(Vec2(fx.position, fy.position), t))
+            }
+            val z = toWorld(image, t)
+            measurement = z
+            measurementNs = t
             fx.update(z.x, r)
             fy.update(z.y, r)
+            if (lastImageNs != Long.MIN_VALUE && t > lastImageNs) {
+                val v = (image - lastImage) / ((t - lastImageNs) * 1e-9)
+                imageVelocity = if (imageDt > 0.2) v else imageVelocity + (v - imageVelocity) * 0.3
+            }
+            lastImage = image
+            lastImageNs = t
             lastSeenNs = t
             confidence = match.score
             state = TrackState.TRACKING
@@ -241,6 +286,12 @@ class TargetTracker(
                 // A detector confirmed the track: refresh the drift anchor where the template is
                 // registered (detection boxes jitter by several pixels; the match does not).
                 template.reanchor(frame, match!!.center)
+                // Remember where the tracking point sits inside the detection box, so a later
+                // re-seed lands on the same spot of the aircraft instead of the box center.
+                val size = max(box.width, box.height)
+                val rel = (match.center * s - box.center) / size
+                pointOffset = if (pointOffsetValid) pointOffset + (rel - pointOffset) * 0.2 else rel
+                pointOffsetValid = true
                 lastEvent = "confirm:${det.source}"
             }
             // Re-seed when the template lost the target, or when the neural detector (more
@@ -249,11 +300,14 @@ class TargetTracker(
             val reseed = !measured ||
                 (!consistent && det.source == DetectionSource.NEURAL && match!!.score < config.reseedScore)
             if (reseed) {
-                val z = toWorld(box.center, t)
+                val point = trackingPoint(box)
+                val z = toWorld(point, t)
+                measurement = z
+                measurementNs = t
                 val r = (config.detectionStdFraction * max(box.width, box.height)).let { it * it }
                 fx.update(z.x, r)
                 fy.update(z.y, r)
-                template.init(frame, box.scaled(1 / s))
+                template.init(frame, box.movedTo(point).scaled(1 / s))
                 lastEvent = "reseed:${det.source}"
                 lastSeenNs = t
                 confidence = det.score.toDouble()
@@ -309,6 +363,14 @@ class TargetTracker(
         return true
     }
 
+    private fun isGood(m: TemplateTracker.Match?): Boolean =
+        m != null && m.score >= config.minMatchScore && m.anchorScore >= config.minAnchorScore &&
+            m.contrastRatio >= config.minContrastRatio && m.contrast >= config.minContrast
+
+    /** The stable tracking point for a detection box: box center plus the learned offset. */
+    private fun trackingPoint(box: Box): Vec2 =
+        if (pointOffsetValid) box.center + pointOffset * max(box.width, box.height) else box.center
+
     private fun startTrack(frame: LumaFrame, box: Box) {
         val t = frame.timestampNs
         val w = toWorld(box.center, t)
@@ -325,6 +387,11 @@ class TargetTracker(
         state = TrackState.TRACKING
         userSelected = false
         neuralDisagreements = 0
+        pointOffset = Vec2.ZERO
+        pointOffsetValid = false
+        lastImage = box.center
+        lastImageNs = t
+        imageVelocity = Vec2.ZERO
     }
 
     /**
@@ -396,6 +463,7 @@ class TargetTracker(
                 height = height,
                 confidence = confidence,
                 lastMeasuredNs = lastSeenNs,
+                measuredWorld = if (measurementNs == t && state != TrackState.LOST) measurement else null,
             )
         }
         prediction = p

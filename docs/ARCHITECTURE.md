@@ -83,7 +83,20 @@ kaydı birkaç kare geciktirir.
    çizilir ve o karenin kamera zaman damgasıyla kodlanır; ses senkronu bozulmaz. Kayıt durunca
    bekleyen kareler kısalan bakış penceresiyle tamamlanır.
 
-Ön ayarlar: *hızlı* (0.2 s, yumuşaklık 0.4), *dengeli* (0.33 s, 0.6), *sinematik* (0.5 s, 0.8).
+6. **Uçağa kilit (nokta takibi, varsayılan).** Editörlerdeki nokta izleyici gibi: kadraj, takipçinin
+   *her karede ölçtüğü* ham takip noktasına (alt-piksel şablon eşleşmesi) kilitlenir, Kalman
+   filtresinin gecikmeli tahminine değil. Uçak çıkışta yerinde durur; el titremesi, uçağın ölçülen
+   konumunun içinde olduğu için kendiliğinden iptal olur ve ileriye bakan pencere yalnızca ölçüm
+   gürültüsünü yumuşatır (hedef ağırlığı 20, hedef sınırı ±%30).
+   - **Sabit takip noktası**: nokta, tespit kutusunun merkezine göre konumu öğrenilerek tutulur;
+     sinir ağı hedefi yeniden yakaladığında şablon kutu merkezine değil aynı fiziksel noktaya
+     oturur (önceden her yeniden yakalamada nokta ±50 px zıplıyordu).
+   - **Gökyüzünde referans uçağın kendisi**: arka planda doku yoksa (görsel hareket güvenilmez)
+     takipçi uçağı kendi görüntü içi hareketiyle arar ve beklenmeyen hareketi kameraya atfederek
+     pozu düzeltir; uçağın dünya yolu düzgün kalır.
+
+Ön ayarlar: *uçağa kilit* (0.33 s, kilit), *hızlı* (0.2 s, yumuşaklık 0.4), *dengeli* (0.33 s, 0.6),
+*sinematik* (0.5 s, 0.8).
 Önizlemede "çıkış" görünümü kaydedilen (gecikmeli, stabilize) görüntüyü gösterir.
 
 ## Otomatik zoom (`AutoZoom`)

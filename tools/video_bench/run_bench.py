@@ -122,6 +122,9 @@ def metrics(rows, dets, fps, src_w):
                 agree += 1
                 break
     zooms = [float(r["zoom"]) for r in rows]
+    # Output framing: how far the aircraft sits from the output center (fraction of the half crop).
+    centering = [max(abs(float(r["tx"]) - float(r["cx"])) / (float(r["cw"]) / 2), abs(float(r["ty"]) - float(r["cy"])) / (float(r["ch"]) / 2))
+                 for r in rows if float(r["tx"]) >= 0]
     ms = [float(r["ms"]) for r in rows]
     return {
         "frames": n,
@@ -136,6 +139,9 @@ def metrics(rows, dets, fps, src_w):
         "target_jerk_x1000": round(second_diff_rms("tx", "ty", has) / src_w * 1000, 3),
         "neural_agreement": None if total == 0 else round(agree / total, 3),
         "neural_frames_checked": total,
+        "zoom_mean": round(sum(zooms) / n, 2),
+        "center_offset_mean": round(sum(centering) / len(centering), 3) if centering else None,
+        "target_outside_crop": round(sum(c > 1 for c in centering) / len(centering), 3) if centering else None,
         "zoom_min": round(min(zooms), 2),
         "zoom_max": round(max(zooms), 2),
         "tracker_ms_avg": round(sum(ms) / n, 2),

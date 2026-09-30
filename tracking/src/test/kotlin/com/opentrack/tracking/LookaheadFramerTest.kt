@@ -87,4 +87,22 @@ class LookaheadFramerTest {
             assertTrue(o.crop.cx - e.x >= -1e-6 && o.crop.cy - e.y >= -1e-6)
         }
     }
+
+    @Test
+    fun pointLockCentersTheMeasuredPointNotTheFilteredTrack() {
+        // The filtered track lags the aircraft by 60 px; the per-frame measurement is exact.
+        fun truth(t: Long) = Vec2(1600 + 200 * t * 1e-9, 1000 + 60 * sin(t * 1e-9 * 3))
+        fun track(t: Long) = TrackPrediction(
+            TrackState.TRACKING, t, truth(t) - Vec2(60.0, 0.0), Vec2(200.0, 0.0), 80.0, 40.0, 1.0,
+            measuredWorld = truth(t),
+        )
+        fun maxOffset(lock: Boolean): Double {
+            val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 20, lockToPoint = lock, targetWeight = 20.0))
+            val out = run(f, 240) { track(it) }
+            return out.subList(30, 210).maxOf { o -> o.crop.toLocal(truth(o.timestampNs)).length() }
+        }
+        val loose = maxOffset(false)
+        val locked = maxOffset(true)
+        assertTrue("locked $locked px should be well under loose $loose px", locked < 10.0 && loose > 40.0)
+    }
 }

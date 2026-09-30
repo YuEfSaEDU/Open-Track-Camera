@@ -33,7 +33,7 @@ class VisualMotionEstimator(
     /** RANSAC inlier threshold, analysis pixels. */
     private val inlierThreshold: Double = 0.75,
     historyCapacity: Int = 1024,
-) : CameraMotion {
+) : CameraMotion, MotionReliability, CorrectableMotion {
 
     /** Motion between the previous and the current frame, source px / radians. */
     data class Step(val shift: Vec2, val rotation: Double, val features: Int, val inliers: Int, val reliable: Boolean)
@@ -51,6 +51,7 @@ class VisualMotionEstimator(
     private val offX = DoubleArray(historyCapacity)
     private val offY = DoubleArray(historyCapacity)
     private val rolls = DoubleArray(historyCapacity)
+    private val reliable = BooleanArray(historyCapacity)
     private var head = -1
     private var count = 0
     private var poseOffset = Vec2.ZERO
@@ -78,7 +79,7 @@ class VisualMotionEstimator(
         val p = prev
         prev = cur
         if (p == null) {
-            record(frame.timestampNs)
+            record(frame.timestampNs, true)
             return null
         }
         val s = frame.scale
@@ -89,8 +90,25 @@ class VisualMotionEstimator(
             poseRoll += step.rotation
             poseOffset = poseOffset.rotated(step.rotation) + step.shift
         }
-        record(frame.timestampNs)
+        record(frame.timestampNs, step.reliable)
         return step
+    }
+
+    override fun isReliableAt(timestampNs: Long): Boolean = synchronized(lock) {
+        if (count == 0) return true
+        val size = times.size
+        for (i in 0 until count) {
+            val k = (head - i + size) % size
+            if (times[k] <= timestampNs) return reliable[k]
+        }
+        return reliable[(head - count + 1 + size) % size]
+    }
+
+    override fun correct(timestampNs: Long, offsetDelta: Vec2) = synchronized(lock) {
+        if (count == 0 || times[head] != timestampNs) return
+        poseOffset += offsetDelta
+        offX[head] = poseOffset.x
+        offY[head] = poseOffset.y
     }
 
     private fun estimate(p: Pyramid, cur: Pyramid, exclude: Box?, scale: Double): Step {
@@ -146,12 +164,13 @@ class VisualMotionEstimator(
         )
     }
 
-    private fun record(t: Long) = synchronized(lock) {
+    private fun record(t: Long, ok: Boolean) = synchronized(lock) {
         head = (head + 1) % times.size
         times[head] = t
         offX[head] = poseOffset.x
         offY[head] = poseOffset.y
         rolls[head] = poseRoll
+        reliable[head] = ok
         if (count < times.size) count++
     }
 

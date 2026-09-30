@@ -30,6 +30,24 @@ fun interface CameraMotion {
     }
 }
 
+/**
+ * Optional capability of a [CameraMotion] whose estimate can be missing on some frames (e.g.
+ * image-based motion over a featureless sky). A gyroscope is always reliable.
+ */
+interface MotionReliability {
+    fun isReliableAt(timestampNs: Long): Boolean
+}
+
+/**
+ * Optional capability: lets the tracker fix the latest pose when it knows better. Over a
+ * featureless sky the aircraft is the only reference, so the tracker attributes its unexpected
+ * image motion to the camera and keeps the aircraft's world path smooth.
+ */
+interface CorrectableMotion {
+    /** Adds [offsetDelta] to the pose of the latest frame (only if [timestampNs] is that frame). */
+    fun correct(timestampNs: Long, offsetDelta: Vec2)
+}
+
 fun Vec2.rotated(angle: Double): Vec2 {
     if (angle == 0.0) return this
     val c = cos(angle)
