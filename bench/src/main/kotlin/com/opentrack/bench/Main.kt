@@ -65,7 +65,7 @@ fun main(args: Array<String>) {
             auto = true,
             minZoom = a.double("zoom-min", 1.0),
             maxZoom = a.double("zoom-max", 3.0),
-            targetFill = a.double("fill", 0.25),
+            targetFill = a.double("fill", ZoomConfig().targetFill),
             offsetWiden = a.double("offset-widen", ZoomConfig().offsetWiden),
             coastWidenPerS = a.double("coast-widen", ZoomConfig().coastWidenPerS),
         )

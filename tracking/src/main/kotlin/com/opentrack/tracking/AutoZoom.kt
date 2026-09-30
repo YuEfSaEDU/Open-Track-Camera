@@ -12,7 +12,7 @@ data class ZoomConfig(
     val minZoom: Double = 1.0,
     val maxZoom: Double = 4.0,
     /** Desired size of the target's larger side as a fraction of the crop width. */
-    val targetFill: Double = 0.25,
+    val targetFill: Double = 0.35,
     /** Relative size error (in ln units, ~12%) tolerated before the zoom starts moving. */
     val deadband: Double = 0.12,
     /** Time constant of the zoom response, seconds. */
@@ -21,9 +21,9 @@ data class ZoomConfig(
     val maxZoomInRate: Double = 0.45,
     val maxZoomOutRate: Double = 1.2,
     /** While the tracker only predicts, widen by this factor per second of coasting. */
-    val coastWidenPerS: Double = 0.6,
+    val coastWidenPerS: Double = 0.3,
     /** Zoom out when the target drifts further than this from the crop center (fraction of half crop). */
-    val offsetWiden: Double = 0.3,
+    val offsetWiden: Double = 0.6,
 )
 
 /**

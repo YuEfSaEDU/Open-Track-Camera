@@ -198,7 +198,12 @@ class MainActivity : AppCompatActivity() {
         // Base clock offset camera → gyro (SensorEvent timestamps use elapsedRealtimeNanos).
         val clockOffsetNs = if (p.timestampRealtime) 0L else SystemClock.elapsedRealtimeNanos() - System.nanoTime()
 
-        val tracker = TargetTracker(motion, TrackerConfig.forSource(srcW, hasGyro = g.available).copy(autoAcquire = autoLock))
+        // Image-space search: when the operator pans with the aircraft (the usual case), it stays
+        // put in the image while moving fast in the world; searching there keeps the lock.
+        val tracker = TargetTracker(
+            motion,
+            TrackerConfig.forSource(srcW, hasGyro = g.available).copy(autoAcquire = autoLock, imageSpaceSearch = true),
+        )
         val detector = AircraftDetector.create(this)
         if (detector == null) Toast.makeText(this, R.string.no_neural, Toast.LENGTH_SHORT).show()
 

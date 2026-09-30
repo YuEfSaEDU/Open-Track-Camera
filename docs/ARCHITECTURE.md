@@ -219,6 +219,20 @@ LDLᵀ'de sütun sırası hatası, görsel hareket tahmininde düşük dokulu g�
 Kayıtlı videolarda jiroskop yok; gerçek cihazda jiroskop kamera hareketini gecikmesiz ve daha
 doğru verdiği için sonuçların daha iyi olması beklenir (cihazda doğrulanmalı).
 
+**Uçağa kilit + yakın kadraj** (varsayılan). Önceki sürümde uçak kırpma merkezinden uzakta kalıyor,
+otomatik zoom da bu yüzden geri açılıyordu ("görüntü uzak"). Sabit takip noktası, nokta kilidi,
+görüntü içi arama ve daha sıkı zoom (doluluk 0.35, geri açılma eşiği 0.6) ile, zoom sınırı 3x:
+
+| Video | Ortalama zoom (ilk → önceki → yeni) | Uçağın merkezden uzaklığı* | Çıkış sarsıntısı |
+|---|---|---|---|
+| Jim Parker | 2.06 → 1.78 → 2.08 | 0.34 → 0.58 → 0.36 | 21.3 → 25.7 → 18.6 |
+| Wings Over Georgia | 2.74 → 2.40 → 2.81 | 0.33 → 0.70 → 0.36 | 62.0 → 49.9 → 65.5 |
+| Red Arrows in Action | 1.71 → 2.41 → 2.67 | 1.14 → 0.69 → 0.53 | 75.3 → 75.0 → 57.1 |
+
+\* yarım kırpma boyutuna oranla (0 = tam merkez, 1 = kenar). Daha yakın kadraj aynı açısal
+titremeyi daha fazla piksele büyütür; bu yüzden en yakın kadrajda piksel sarsıntısı bazen artar.
+Takip oranı Jim Parker'da düştü (%78 → %69), diğerlerinde arttı.
+
 ## Cihazda doğrulama listesi
 
 Bu kod bulut ortamında yazıldı; derleniyor ve `tracking` testleri geçiyor ama kamera/GL/sensör
