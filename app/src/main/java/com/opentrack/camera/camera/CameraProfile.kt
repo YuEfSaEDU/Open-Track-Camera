@@ -35,11 +35,17 @@ data class CameraProfile(
     val forced: Boolean = false,
     /** The camera accepts stream use cases (Android 13+), so the stream can be tagged as video recording. */
     val supportsStreamUseCase: Boolean = false,
+    /**
+     * Constrained high-speed session (the only way some phones offer more than 30 fps to other
+     * apps): the sensor runs at [captureFps] and the pipeline uses every n-th frame for [fps].
+     */
+    val highSpeed: Boolean = false,
+    val captureFps: Int = fps,
 ) {
-    val label: String get() = "${sourceSize.width}x${sourceSize.height}@$fps" + if (forced) "!" else ""
+    val label: String get() = "${sourceSize.width}x${sourceSize.height}@$fps" + (if (highSpeed) " HS" else "") + if (forced) "!" else ""
 
     companion object {
-        private data class Candidate(val size: Size, val fps: Int)
+        private data class Candidate(val size: Size, val fps: Int, val highSpeed: Boolean = false)
 
         /** In order of preference. The 4K60 → 1080p60 crop is the whole point of the app. */
         private val WANTED = listOf(
@@ -47,6 +53,7 @@ data class CameraProfile(
             Candidate(Size(3840, 2160), 30),
             Candidate(Size(2560, 1440), 60),
             Candidate(Size(1920, 1080), 60),
+            Candidate(Size(1920, 1080), 60, highSpeed = true),
             Candidate(Size(1920, 1080), 30),
         )
 
@@ -67,6 +74,13 @@ data class CameraProfile(
             val cams = backCameras(manager)
             val out = ArrayList<CameraProfile>()
             for (wanted in WANTED) {
+                if (wanted.highSpeed) {
+                    // Only worth it when the regular session cannot do this rate.
+                    if (out.none { it.sourceSize == wanted.size && it.fps == wanted.fps }) {
+                        cams.firstNotNullOfOrNull { (id, c) -> buildHighSpeed(id, c, wanted.size, wanted.fps) }?.let { out += it }
+                    }
+                    continue
+                }
                 val p = cams.firstNotNullOfOrNull { (id, c) -> build(id, c, wanted.size, wanted.fps) }
                     ?: cams.firstNotNullOfOrNull { (id, c) ->
                         c.physicalCameraIds.firstNotNullOfOrNull { phys ->
@@ -84,6 +98,21 @@ data class CameraProfile(
         private fun backCameras(manager: CameraManager): List<Pair<String, CameraCharacteristics>> =
             manager.cameraIdList.map { it to manager.getCameraCharacteristics(it) }
                 .filter { it.second.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_BACK }
+
+        /**
+         * [fps] from a constrained high-speed session: a fixed high-speed range that is a
+         * multiple of [fps] (e.g. [120, 120] for 60), decimated by the pipeline.
+         */
+        private fun buildHighSpeed(id: String, c: CameraCharacteristics, size: Size, fps: Int): CameraProfile? {
+            val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: return null
+            if (CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO !in caps) return null
+            val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+            if (map.highSpeedVideoSizes.none { it == size }) return null
+            val range = map.getHighSpeedVideoFpsRangesFor(size)
+                .filter { it.lower == it.upper && it.upper >= fps && it.upper % fps == 0 }
+                .minByOrNull { it.upper } ?: return null
+            return build(id, c, size, fps, force = true)?.copy(fpsRange = range, forced = false, highSpeed = true, captureFps = range.upper)
+        }
 
         private fun build(id: String, c: CameraCharacteristics, size: Size, fps: Int, force: Boolean = false): CameraProfile? {
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null

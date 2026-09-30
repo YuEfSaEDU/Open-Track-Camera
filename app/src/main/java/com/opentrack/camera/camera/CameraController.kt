@@ -2,6 +2,7 @@ package com.opentrack.camera.camera
 
 import android.annotation.SuppressLint
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
@@ -23,7 +24,12 @@ import java.util.concurrent.TimeUnit
  * Camera2 wrapper with a single output (the render pipeline's SurfaceTexture). All camera
  * work happens on a private handler thread.
  */
-class CameraController(private val manager: CameraManager, val profile: CameraProfile) {
+class CameraController(
+    private val manager: CameraManager,
+    val profile: CameraProfile,
+    /** Experimental: send Honor's vendor keys (see [VendorKeys]). */
+    private val vendorExperiment: Boolean = false,
+) {
 
     interface Listener {
         /** Per-frame metadata useful for motion compensation (all in ns). */
@@ -67,17 +73,21 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
         })
     }
 
+    private val characteristics by lazy { manager.getCameraCharacteristics(profile.cameraId) }
+
     private fun createSession(camera: CameraDevice, target: Surface) {
         val output = OutputConfiguration(target).apply {
-            profile.physicalCameraId?.let { setPhysicalCameraId(it) }
-            // Declare the stream as video recording: some HALs only offer their video sensor
-            // modes (e.g. 4K60) to streams with this use case.
-            if (Build.VERSION.SDK_INT >= 33 && profile.supportsStreamUseCase) {
-                streamUseCase = CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_VIDEO_RECORD.toLong()
+            if (!profile.highSpeed) {
+                profile.physicalCameraId?.let { setPhysicalCameraId(it) }
+                // Declare the stream as video recording: some HALs only offer their video sensor
+                // modes (e.g. 4K60) to streams with this use case.
+                if (Build.VERSION.SDK_INT >= 33 && profile.supportsStreamUseCase) {
+                    streamUseCase = CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_VIDEO_RECORD.toLong()
+                }
             }
         }
         val config = SessionConfiguration(
-            SessionConfiguration.SESSION_REGULAR,
+            if (profile.highSpeed) SessionConfiguration.SESSION_HIGH_SPEED else SessionConfiguration.SESSION_REGULAR,
             listOf(output),
             executor,
             object : CameraCaptureSession.StateCallback() {
@@ -96,6 +106,7 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
         runCatching {
             config.sessionParameters = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, profile.fpsRange)
+                if (vendorExperiment) Log.i(TAG, "vendor session keys: " + VendorKeys.apply(this, characteristics))
             }.build()
         }.onFailure { Log.w(TAG, "session parameters rejected", it) }
         camera.createCaptureSession(config)
@@ -128,9 +139,12 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
         }
 
+        if (vendorExperiment) VendorKeys.apply(b, characteristics)
+
         val exp = profile.exposureRangeNs
         val iso = profile.isoRange
-        if (s.shutterPriority && profile.supportsManualSensor && exp != null && iso != null && lastAutoExposureNs > 0) {
+        // High-speed sessions only honor automatic exposure (and 1/120 s is short already).
+        if (!profile.highSpeed && s.shutterPriority && profile.supportsManualSensor && exp != null && iso != null && lastAutoExposureNs > 0) {
             val shutter = s.shutterNs.coerceIn(exp.lower, minOf(exp.upper, 1_000_000_000L / profile.fps))
             val derivedIso = (lastAutoIso.toDouble() * lastAutoExposureNs / shutter).toInt().coerceIn(iso.lower, iso.upper)
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
@@ -144,7 +158,12 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
         }
 
         try {
-            ses.setSingleRepeatingRequest(b.build(), executor, captureCallback)
+            if (ses is CameraConstrainedHighSpeedCaptureSession) {
+                // Frames come in bursts (e.g. 4 per request at 120 fps).
+                ses.setRepeatingBurstRequests(ses.createHighSpeedRequestList(b.build()), executor, captureCallback)
+            } else {
+                ses.setSingleRepeatingRequest(b.build(), executor, captureCallback)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "setRepeatingRequest failed", e)
             listener?.onError(e.message ?: "repeating request failed")

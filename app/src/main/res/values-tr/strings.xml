@@ -39,4 +39,7 @@
     <string name="resolution">Akış: %s</string>
     <string name="camera_report">Kamera raporu</string>
     <string name="forced_4k60_hint">Deneysel: telefon 4K60\'ı bu uygulamaya sunmuyor. Görüntü donarsa, hata verirse veya 30 fps\'te kalırsa geri alın.</string>
+    <string name="vendor_unlock_off">Üretici kilidi: kapalı</string>
+    <string name="vendor_unlock_on">Üretici kilidi: deneniyor</string>
+    <string name="vendor_unlock_hint">Deneysel: üreticinin kamera anahtarları gönderiliyor. Sonra Akış\'tan 4K@60! seçip durum satırındaki fps\'e bakın.</string>
 </resources>

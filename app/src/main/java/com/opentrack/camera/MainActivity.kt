@@ -24,6 +24,7 @@ import com.opentrack.camera.camera.CameraController
 import com.opentrack.camera.camera.CameraProfile
 import com.opentrack.camera.camera.CameraReport
 import com.opentrack.camera.camera.CameraSettings
+import com.opentrack.camera.camera.VendorKeys
 import com.opentrack.camera.detect.AircraftDetector
 import com.opentrack.camera.pipeline.AnalysisEngine
 import com.opentrack.camera.pipeline.OverlayState
@@ -150,6 +151,14 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.resolution).setOnClickListener { cycleResolution() }
         findViewById<Button>(R.id.cameraReport).setOnClickListener { shareCameraReport() }
+        findViewById<Button>(R.id.vendorUnlock).setOnClickListener {
+            if (recorder?.isRecording == true) return@setOnClickListener
+            prefs.edit { putBoolean(PREF_VENDOR, !prefs.getBoolean(PREF_VENDOR, false)) }
+            if (prefs.getBoolean(PREF_VENDOR, false)) Toast.makeText(this, R.string.vendor_unlock_hint, Toast.LENGTH_LONG).show()
+            stopPipeline()
+            startPipeline()
+            refreshButtons()
+        }
         findViewById<Button>(R.id.autoZoom).setOnClickListener {
             updateZoomConfig(zoomConfig.copy(auto = !zoomConfig.auto))
         }
@@ -249,7 +258,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun openCamera(p: CameraProfile, surface: Surface, model: GyroMotionModel, clockOffsetNs: Long) {
         if (pipeline == null) return
-        val cam = CameraController(getSystemService(CameraManager::class.java), p)
+        val cam = CameraController(getSystemService(CameraManager::class.java), p, vendorExperiment = prefs.getBoolean(PREF_VENDOR, false))
         cam.listener = object : CameraController.Listener {
             override fun onFrameMetadata(timestampNs: Long, exposureNs: Long, rollingShutterSkewNs: Long) {
                 // Compare against the gyro at the middle of the exposure of the middle row.
@@ -309,7 +318,10 @@ class MainActivity : AppCompatActivity() {
 
     /** Shares what the camera stack offers to this app, to see where 4K60 went. */
     private fun shareCameraReport() {
-        val text = runCatching { CameraReport.build(getSystemService(CameraManager::class.java), profile) }.getOrElse { it.stackTraceToString() }
+        val text = runCatching {
+            "Üretici deneyi: ${if (prefs.getBoolean(PREF_VENDOR, false)) "açık (" + VendorKeys.lastLog + ")" else "kapalı"}, " +
+                "ölçülen fps: ${"%.1f".format(lastMeasuredFps)}\n" + CameraReport.build(getSystemService(CameraManager::class.java), profile)
+        }.getOrElse { it.stackTraceToString() }
         val send = Intent(Intent.ACTION_SEND).setType("text/plain")
             .putExtra(Intent.EXTRA_SUBJECT, "Open Track Camera – kamera raporu")
             .putExtra(Intent.EXTRA_TEXT, text)
@@ -485,7 +497,11 @@ class MainActivity : AppCompatActivity() {
         if (blocking) finish() else thread(name = "recorder-stop") { finish() }
     }
 
+    /** Frame rate the pipeline actually gets, for the camera report. */
+    private var lastMeasuredFps = 0.0
+
     private fun showStatus(s: OverlayState) {
+        lastMeasuredFps = s.fps
         val p = profile ?: return
         val stateText = getString(
             when (s.trackState) {
@@ -515,6 +531,11 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.focus).setText(if (settings.focusInfinity) R.string.focus_inf_on else R.string.focus_inf_off)
         findViewById<Button>(R.id.shutter).setText(if (settings.shutterPriority) R.string.shutter_fast_on else R.string.shutter_fast_off)
         findViewById<Button>(R.id.autoZoom).setText(if (zoomConfig.auto) R.string.auto_zoom_on else R.string.auto_zoom_off)
+        val manager = getSystemService(CameraManager::class.java)
+        val vendor = findViewById<Button>(R.id.vendorUnlock)
+        val hasVendorKeys = runCatching { profile?.let { VendorKeys.isAvailable(manager.getCameraCharacteristics(it.cameraId)) } ?: false }.getOrDefault(false)
+        vendor.visibility = if (hasVendorKeys) android.view.View.VISIBLE else android.view.View.GONE
+        vendor.setText(if (prefs.getBoolean(PREF_VENDOR, false)) R.string.vendor_unlock_on else R.string.vendor_unlock_off)
         findViewById<Button>(R.id.resolution).text = getString(R.string.resolution, profile?.label?.replace("3840x2160", "4K")?.replace("2560x1440", "1440p")?.replace("1920x1080", "1080p") ?: "-")
         findViewById<Button>(R.id.stabilizer).setText(stabPreset.label)
         findViewById<Button>(R.id.horizon).setText(if (horizonLock) R.string.horizon_on else R.string.horizon_off)
@@ -526,6 +547,7 @@ class MainActivity : AppCompatActivity() {
         const val REQUEST_PERMISSIONS = 1
         const val PREF_PROFILE = "profile"
         const val PREF_FORCE_4K60 = "force4k60"
+        const val PREF_VENDOR = "vendorUnlock"
         const val FORCED_4K60 = "3840x2160@60!"
     }
 }

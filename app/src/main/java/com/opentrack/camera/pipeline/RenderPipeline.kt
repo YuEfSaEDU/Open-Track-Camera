@@ -89,6 +89,10 @@ class RenderPipeline(
     private var framer = LookaheadFramer(srcW, srcH, motion, stabilizer)
     private var lastOutput: LookaheadFramer.Output? = null
 
+    private var lastKeptNs = Long.MIN_VALUE
+    /** Slightly under the output frame interval, so timestamp jitter does not drop frames. */
+    private val keepIntervalNs = (1_000_000_000L / profile.fps) * 3 / 4
+
     private var fpsWindowStart = 0L
     private var fpsFrames = 0
     private var fps = 0.0
@@ -210,6 +214,12 @@ class RenderPipeline(
         st.updateTexImage()
         st.getTransformMatrix(texMatrix)
         val ts = st.timestamp
+        // High-speed capture (e.g. 120 fps for a 60 fps pipeline): keep one frame per output
+        // interval, chosen by timestamp since high-speed frames arrive in bursts.
+        if (profile.captureFps > profile.fps) {
+            if (lastKeptNs != Long.MIN_VALUE && ts - lastKeptNs < keepIntervalNs) return
+            lastKeptNs = if (lastKeptNs == Long.MIN_VALUE || ts - lastKeptNs > 2 * keepIntervalNs) ts else lastKeptNs + 1_000_000_000L / profile.fps
+        }
         if (pendingRecordStart) {
             recordFromNs = ts
             pendingRecordStart = false

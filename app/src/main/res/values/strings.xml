@@ -42,4 +42,7 @@
     <string name="resolution">Stream: %s</string>
     <string name="camera_report">Camera report</string>
     <string name="forced_4k60_hint">Experimental: 4K60 is not offered to this app. If the picture freezes, errors or stays at 30 fps, switch back.</string>
+    <string name="vendor_unlock_off">Maker unlock: off</string>
+    <string name="vendor_unlock_on">Maker unlock: trying</string>
+    <string name="vendor_unlock_hint">Experimental: sends the maker\'s camera keys. Then pick Stream 4K@60! and check the fps in the status line.</string>
 </resources>
