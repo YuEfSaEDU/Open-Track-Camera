@@ -10,6 +10,7 @@ import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -67,9 +68,17 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
     }
 
     private fun createSession(camera: CameraDevice, target: Surface) {
+        val output = OutputConfiguration(target).apply {
+            profile.physicalCameraId?.let { setPhysicalCameraId(it) }
+            // Declare the stream as video recording: some HALs only offer their video sensor
+            // modes (e.g. 4K60) to streams with this use case.
+            if (Build.VERSION.SDK_INT >= 33 && profile.supportsStreamUseCase) {
+                streamUseCase = CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_VIDEO_RECORD.toLong()
+            }
+        }
         val config = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR,
-            listOf(OutputConfiguration(target)),
+            listOf(output),
             executor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
@@ -82,6 +91,13 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
                 }
             },
         )
+        // The frame rate range is a session parameter on many HALs: the sensor mode is picked when
+        // the session is configured, so pass it up front, not only in the repeating request.
+        runCatching {
+            config.sessionParameters = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, profile.fpsRange)
+            }.build()
+        }.onFailure { Log.w(TAG, "session parameters rejected", it) }
         camera.createCaptureSession(config)
     }
 

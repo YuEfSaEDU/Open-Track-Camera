@@ -100,6 +100,8 @@
             <Button android:id="@+id/detector" style="@style/ControlToggle" />
             <Button android:id="@+id/focus" style="@style/ControlToggle" />
             <Button android:id="@+id/shutter" style="@style/ControlToggle" />
+            <Button android:id="@+id/resolution" style="@style/ControlToggle" />
+            <Button android:id="@+id/cameraReport" style="@style/ControlToggle" android:text="@string/camera_report" />
         </LinearLayout>
     </ScrollView>
 </FrameLayout>

@@ -1,6 +1,7 @@
 package com.opentrack.camera
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.SensorManager
 import android.hardware.camera2.CameraManager
@@ -15,11 +16,13 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.opentrack.camera.camera.CameraController
 import com.opentrack.camera.camera.CameraProfile
+import com.opentrack.camera.camera.CameraReport
 import com.opentrack.camera.camera.CameraSettings
 import com.opentrack.camera.detect.AircraftDetector
 import com.opentrack.camera.pipeline.AnalysisEngine
@@ -50,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recordButton: Button
 
     private var profile: CameraProfile? = null
+    private val prefs by lazy { getSharedPreferences("camera", MODE_PRIVATE) }
     private var camera: CameraController? = null
     private var pipeline: RenderPipeline? = null
     private var analysis: AnalysisEngine? = null
@@ -144,6 +148,8 @@ class MainActivity : AppCompatActivity() {
             if (applyStabilizer(stabPreset, !horizonLock)) horizonLock = !horizonLock
             refreshButtons()
         }
+        findViewById<Button>(R.id.resolution).setOnClickListener { cycleResolution() }
+        findViewById<Button>(R.id.cameraReport).setOnClickListener { shareCameraReport() }
         findViewById<Button>(R.id.autoZoom).setOnClickListener {
             updateZoomConfig(zoomConfig.copy(auto = !zoomConfig.auto))
         }
@@ -174,11 +180,12 @@ class MainActivity : AppCompatActivity() {
     private fun startPipeline() {
         if (pipeline != null) return
         val manager = getSystemService(CameraManager::class.java)
-        val p = CameraProfile.select(manager) ?: run {
+        val p = CameraProfile.select(manager, prefs.getString(PREF_PROFILE, null), prefs.getBoolean(PREF_FORCE_4K60, false)) ?: run {
             Toast.makeText(this, R.string.no_camera, Toast.LENGTH_LONG).show()
             return
         }
         profile = p
+        refreshButtons()
         val srcW = p.sourceSize.width
         val srcH = p.sourceSize.height
         if (srcW >= 2560) { outputWidth = 1920; outputHeight = 1080 } else { outputWidth = 1280; outputHeight = 720 }
@@ -277,6 +284,36 @@ class MainActivity : AppCompatActivity() {
         val rs = RollingShutter(skewNs, dir, extent)
         rp.rollingShutter = rs
         tracker?.rollingShutter = rs
+    }
+
+    /**
+     * Next stream profile the phone offers (best first), then an experimental forced 4K60 when
+     * the phone does not list it (some makers keep 4K60 for their own camera app).
+     */
+    private fun cycleResolution() {
+        if (recorder?.isRecording == true) return
+        val manager = getSystemService(CameraManager::class.java)
+        val labels = CameraProfile.available(manager).map { it.label }.toMutableList()
+        if (labels.none { it.startsWith("3840x2160@60") }) labels += FORCED_4K60
+        val current = profile?.label
+        val next = labels[(labels.indexOf(current) + 1) % labels.size]
+        prefs.edit {
+            putString(PREF_PROFILE, next.removeSuffix("!"))
+            putBoolean(PREF_FORCE_4K60, next == FORCED_4K60)
+        }
+        if (next == FORCED_4K60) Toast.makeText(this, R.string.forced_4k60_hint, Toast.LENGTH_LONG).show()
+        stopPipeline()
+        startPipeline()
+        refreshButtons()
+    }
+
+    /** Shares what the camera stack offers to this app, to see where 4K60 went. */
+    private fun shareCameraReport() {
+        val text = runCatching { CameraReport.build(getSystemService(CameraManager::class.java), profile) }.getOrElse { it.stackTraceToString() }
+        val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+            .putExtra(Intent.EXTRA_SUBJECT, "Open Track Camera – kamera raporu")
+            .putExtra(Intent.EXTRA_TEXT, text)
+        startActivity(Intent.createChooser(send, getString(R.string.camera_report)))
     }
 
     private fun stopPipeline() {
@@ -478,6 +515,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.focus).setText(if (settings.focusInfinity) R.string.focus_inf_on else R.string.focus_inf_off)
         findViewById<Button>(R.id.shutter).setText(if (settings.shutterPriority) R.string.shutter_fast_on else R.string.shutter_fast_off)
         findViewById<Button>(R.id.autoZoom).setText(if (zoomConfig.auto) R.string.auto_zoom_on else R.string.auto_zoom_off)
+        findViewById<Button>(R.id.resolution).text = getString(R.string.resolution, profile?.label?.replace("3840x2160", "4K")?.replace("2560x1440", "1440p")?.replace("1920x1080", "1080p") ?: "-")
         findViewById<Button>(R.id.stabilizer).setText(stabPreset.label)
         findViewById<Button>(R.id.horizon).setText(if (horizonLock) R.string.horizon_on else R.string.horizon_off)
     }
@@ -486,5 +524,8 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val REQUEST_PERMISSIONS = 1
+        const val PREF_PROFILE = "profile"
+        const val PREF_FORCE_4K60 = "force4k60"
+        const val FORCED_4K60 = "3840x2160@60!"
     }
 }

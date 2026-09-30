@@ -36,4 +36,7 @@
     <string name="save_failed">Kayıt başarısız</string>
     <string name="no_neural">Sinir ağı dedektörü yok, yalnızca gökyüzü dedektörü</string>
     <string name="status">%1$s → %2$dx%3$d@%4$d · %5$.0f fps · analiz %6$.1f ms · NN %7$.0f ms · %8$s</string>
+    <string name="resolution">Akış: %s</string>
+    <string name="camera_report">Kamera raporu</string>
+    <string name="forced_4k60_hint">Deneysel: telefon 4K60\'ı bu uygulamaya sunmuyor. Görüntü donarsa, hata verirse veya 30 fps\'te kalırsa geri alın.</string>
 </resources>

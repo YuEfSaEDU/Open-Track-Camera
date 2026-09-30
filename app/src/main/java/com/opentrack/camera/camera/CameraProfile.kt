@@ -4,6 +4,7 @@ import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
+import android.os.Build
 import android.util.Range
 import android.util.Size
 
@@ -25,8 +26,17 @@ data class CameraProfile(
     val aeCompensationRange: Range<Int>,
     val timestampRealtime: Boolean,
     val hasOis: Boolean,
+    /**
+     * Stream from this physical camera of the logical [cameraId] (multi-camera phones may
+     * offer a mode on a physical lens that the logical camera does not list), or null.
+     */
+    val physicalCameraId: String? = null,
+    /** Requested although the camera does not advertise it (experimental; may fail or run slower). */
+    val forced: Boolean = false,
+    /** The camera accepts stream use cases (Android 13+), so the stream can be tagged as video recording. */
+    val supportsStreamUseCase: Boolean = false,
 ) {
-    val label: String get() = "${sourceSize.width}x${sourceSize.height}@$fps"
+    val label: String get() = "${sourceSize.width}x${sourceSize.height}@$fps" + if (forced) "!" else ""
 
     companion object {
         private data class Candidate(val size: Size, val fps: Int)
@@ -40,29 +50,52 @@ data class CameraProfile(
             Candidate(Size(1920, 1080), 30),
         )
 
-        fun select(manager: CameraManager): CameraProfile? {
-            val backIds = manager.cameraIdList.filter {
-                manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_BACK
+        /** The best available profile, or the one labelled [preferred] if it is available. */
+        fun select(manager: CameraManager, preferred: String? = null, force4k60: Boolean = false): CameraProfile? {
+            val all = available(manager)
+            if (force4k60 && all.none { it.sourceSize == FOUR_K && it.fps == 60 }) {
+                backCameras(manager).firstNotNullOfOrNull { (id, c) -> build(id, c, FOUR_K, 60, force = true) }?.let { return it }
             }
-            for (wanted in WANTED) {
-                for (id in backIds) {
-                    build(id, manager.getCameraCharacteristics(id), wanted.size, wanted.fps)?.let { return it }
-                }
-            }
-            return null
+            return all.firstOrNull { it.label == preferred } ?: all.firstOrNull()
         }
 
-        private fun build(id: String, c: CameraCharacteristics, size: Size, fps: Int): CameraProfile? {
+        /**
+         * All wanted profiles the phone offers, best first: each back camera, and each hidden
+         * physical camera behind a logical one (streamed through the logical camera).
+         */
+        fun available(manager: CameraManager): List<CameraProfile> {
+            val cams = backCameras(manager)
+            val out = ArrayList<CameraProfile>()
+            for (wanted in WANTED) {
+                val p = cams.firstNotNullOfOrNull { (id, c) -> build(id, c, wanted.size, wanted.fps) }
+                    ?: cams.firstNotNullOfOrNull { (id, c) ->
+                        c.physicalCameraIds.firstNotNullOfOrNull { phys ->
+                            runCatching { manager.getCameraCharacteristics(phys) }.getOrNull()
+                                ?.let { build(id, it, wanted.size, wanted.fps)?.copy(physicalCameraId = phys) }
+                        }
+                    }
+                if (p != null) out += p
+            }
+            return out
+        }
+
+        private val FOUR_K = Size(3840, 2160)
+
+        private fun backCameras(manager: CameraManager): List<Pair<String, CameraCharacteristics>> =
+            manager.cameraIdList.map { it to manager.getCameraCharacteristics(it) }
+                .filter { it.second.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_BACK }
+
+        private fun build(id: String, c: CameraCharacteristics, size: Size, fps: Int, force: Boolean = false): CameraProfile? {
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
             val sizes = map.getOutputSizes(SurfaceTexture::class.java) ?: return null
             if (sizes.none { it == size }) return null
             val minFrameNs = map.getOutputMinFrameDuration(SurfaceTexture::class.java, size)
-            if (minFrameNs > 1_000_000_000L / fps + 200_000L) return null
+            if (!force && minFrameNs > 1_000_000_000L / fps + 200_000L) return null
             val ranges = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
             // Prefer a fixed range (no frame rate drop in low light), else anything reaching fps.
             val range = ranges.firstOrNull { it.lower == fps && it.upper == fps }
                 ?: ranges.filter { it.upper == fps }.maxByOrNull { it.lower }
-                ?: return null
+                ?: if (force) Range(fps, fps) else return null
 
             val capabilities = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
             val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 4.5f
@@ -95,6 +128,9 @@ data class CameraProfile(
                 timestampRealtime = c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
                     CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME,
                 hasOis = ois,
+                forced = force,
+                supportsStreamUseCase = Build.VERSION.SDK_INT >= 33 &&
+                    CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_STREAM_USE_CASE in capabilities,
             )
         }
     }
