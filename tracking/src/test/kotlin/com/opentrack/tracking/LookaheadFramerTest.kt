@@ -105,4 +105,18 @@ class LookaheadFramerTest {
         val locked = maxOffset(true)
         assertTrue("locked $locked px should be well under loose $loose px", locked < 10.0 && loose > 40.0)
     }
+
+    @Test
+    fun lockStabilizesOnThePointButCentersTheAircraft() {
+        // The template sits on the aircraft's dark core, 30 px above its center.
+        fun point(t: Long) = Vec2(1600 + 200 * t * 1e-9, 1000 + 60 * sin(t * 1e-9 * 3))
+        val toCenter = Vec2(0.0, 30.0)
+        fun track(t: Long) = TrackPrediction(
+            TrackState.TRACKING, t, point(t), Vec2(200.0, 0.0), 80.0, 40.0, 1.0, measuredWorld = point(t), centerOffset = toCenter,
+        )
+        val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 20, lockToPoint = true, targetWeight = 20.0))
+        val out = run(f, 240) { track(it) }
+        val worst = out.subList(30, 210).maxOf { o -> o.crop.toLocal(point(o.timestampNs) + toCenter).length() }
+        assertTrue("aircraft center off by $worst px", worst < 10.0)
+    }
 }

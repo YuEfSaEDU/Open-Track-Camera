@@ -141,7 +141,7 @@ class FramingController(
         val following = track.hasTarget
 
         val goal: Vec2 = if (following) {
-            val w = track.worldAt(timestampNs)
+            val w = track.framingAt(timestampNs)
             val maxLead = config.maxLeadFraction * min(cw, ch) / 2
             var lead = track.velocity * config.leadTimeS
             if (lead.length() > maxLead) lead = lead * (maxLead / lead.length())
@@ -176,7 +176,7 @@ class FramingController(
 
         if (following) {
             // Never let the target leave the central part of the crop.
-            val target = track.worldAt(timestampNs)
+            val target = track.framingAt(timestampNs)
             val limX = config.maxTargetOffset * cw / 2
             val limY = config.maxTargetOffset * ch / 2
             sx = sx.coerceIn(target.x - limX, target.x + limX)
@@ -199,7 +199,7 @@ class FramingController(
         val crop = CropWindow(cx, cy, cw, ch, rotation)
 
         lastTargetOffset = if (following) {
-            val local = crop.toLocal(pose.toImage(track.worldAt(timestampNs), center))
+            val local = crop.toLocal(pose.toImage(track.framingAt(timestampNs), center))
             max(abs(local.x) / (cw / 2), abs(local.y) / (ch / 2))
         } else 0.0
         return crop

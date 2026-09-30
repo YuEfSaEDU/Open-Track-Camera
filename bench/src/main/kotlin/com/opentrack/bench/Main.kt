@@ -4,10 +4,12 @@ import com.opentrack.tracking.Box
 import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.CropWindow
 import com.opentrack.tracking.Detection
+import com.opentrack.tracking.DetectionPlanner
 import com.opentrack.tracking.DetectionSource
 import com.opentrack.tracking.FramingController
 import com.opentrack.tracking.LookaheadFramer
 import com.opentrack.tracking.LumaFrame
+import com.opentrack.tracking.NeuralRun
 import com.opentrack.tracking.SkyBlobDetector
 import com.opentrack.tracking.StabilizerConfig
 import com.opentrack.tracking.TargetTracker
@@ -19,6 +21,7 @@ import com.opentrack.tracking.VisualMotionEstimator
 import com.opentrack.tracking.ZoomConfig
 import java.io.BufferedInputStream
 import java.io.File
+import java.io.InputStream
 import java.io.FileInputStream
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -32,6 +35,13 @@ import kotlin.math.roundToInt
  * render thread: the causal FramingController sets zoom and the capture window, and the
  * LookaheadFramer produces the delayed, stabilized output crop. Recorded videos have no gyro,
  * so camera motion comes from the VisualMotionEstimator (--motion none disables it).
+ *
+ * --live: frames arrive on stdin from run_bench.py, which also runs zoomed (ROI) neural
+ * detections on request, like the app's DetectionPlanner. Per frame, stdin carries a header
+ * line "F n", n result lines "x0 y0 x1 y1 score" (source px) for the previous request (n = -1:
+ * none pending), then the luma bytes; the bench answers on stdout with "R x0 y0 x1 y1" (run
+ * the detector on this region of this frame) or "N". Full-frame detections still come from
+ * --dets, used only for the runs the planner assigns to the whole frame.
  */
 fun main(args: Array<String>) {
     val a = Args(args)
@@ -47,6 +57,15 @@ fun main(args: Array<String>) {
     val scale = srcW.toDouble() / w
 
     val neural = a.opt("dets")?.let { loadDetections(File(it), frameNs) } ?: emptyList()
+    val live = a.flag("live")
+    val roiEnabled = live && a.opt("roi") != "false"
+    // Neural runs happen at ~10 Hz on the frames where --dets has results (run_bench.py's cadence).
+    val neuralStep = maxOf(1, (fps * 0.1).roundToInt())
+    val planner = DetectionPlanner(srcW, srcH)
+    val fullFrameRuns = HashSet<Long>()
+    val roiResults = ArrayList<Detection>()
+    var roiRequestNs = -1L
+    val pendingRuns = ArrayList<NeuralRun>()
     // Camera motion: recorded videos have no gyro, so estimate it from the image (like the
     // app's no-gyro fallback), or ignore it entirely for comparison.
     val estimator = if (a.opt("motion") == "none") null else VisualMotionEstimator()
@@ -110,29 +129,56 @@ fun main(args: Array<String>) {
         )
     }
 
-    val input = BufferedInputStream(FileInputStream(a.str("luma")), 1 shl 20)
+    val input: InputStream = if (live) BufferedInputStream(System.`in`, 1 shl 20) else BufferedInputStream(FileInputStream(a.str("luma")), 1 shl 20)
+    val control = System.out.bufferedWriter()
     var pending = 0 // index into neural (sorted by delivery time)
     var frame = 0
     var totalMs = 0.0
     var maxMs = 0.0
     var lastTargetBox: Box? = null
     while (true) {
+        val t = frame * frameNs
+        if (live) {
+            val header = readLine(input) ?: break
+            val n = header.removePrefix("F ").trim().toInt()
+            repeat(maxOf(0, n)) {
+                val c = readLine(input)!!.trim().split(" ").map { it.toDouble() }
+                roiResults += Detection(Box.fromEdges(c[0], c[1], c[2], c[3]), c[4].toFloat(), "airplane", DetectionSource.NEURAL, roiRequestNs)
+            }
+        }
         val buf = ByteArray(w * h)
         if (input.readNBytes(buf, 0, buf.size) < buf.size) break
-        val t = frame * frameNs
         val lf = LumaFrame(w, h, buf, t, scale)
         val t0 = System.nanoTime()
         val step = estimator?.process(lf, lastTargetBox)
+        // Neural run on this frame: whole frame or zoomed region, decided from the latest prediction.
+        var request = "N"
+        if (live && frame % neuralStep == 0) {
+            val prev = tracker.prediction
+            val tgt = if (prev.hasTarget || prev.state == TrackState.LOST) motion.poseAt(t).toImage(prev.worldAt(t), center) else null
+            val roi = if (roiEnabled) planner.next(prev, tgt, t) else null
+            pendingRuns += NeuralRun(t, roi)
+            if (roi == null) {
+                fullFrameRuns += t
+            } else {
+                request = String.format(Locale.US, "R %.1f %.1f %.1f %.1f", roi.left, roi.top, roi.right, roi.bottom)
+                roiRequestNs = t
+            }
+        }
         val dets = ArrayList<Detection>()
         // Neural results become available after the inference latency, like the async detector thread.
         while (pending < neural.size && neural[pending].timestampNs + latencyNs <= t) {
-            if (neuralEnabled) dets += neural[pending]
+            val d = neural[pending]
+            if (neuralEnabled && (!live || d.timestampNs in fullFrameRuns)) dets += d
             pending++
         }
+        roiResults.removeAll { d -> (d.timestampNs + latencyNs <= t).also { if (it && neuralEnabled) dets += d } }
+        val runs = ArrayList<NeuralRun>()
+        pendingRuns.removeAll { r -> (r.timestampNs + latencyNs <= t).also { if (it && neuralEnabled) runs += r } }
         val nNeural = dets.size
         val skyEvery = if (tracker.prediction.state == TrackState.TRACKING) 12 else 3
         if (skyEnabled && frame % skyEvery == 0) dets += sky.detect(lf)
-        val p = tracker.process(lf, dets)
+        val p = tracker.process(lf, dets, if (a.opt("verify") == "false") emptyList() else runs)
         val ms = (System.nanoTime() - t0) / 1e6
         totalMs += ms
         maxMs = maxOf(maxMs, ms)
@@ -157,11 +203,27 @@ fun main(args: Array<String>) {
         } else {
             write(frame, causal, p)
         }
+        if (live) {
+            control.write(request)
+            control.newLine()
+            control.flush()
+        }
         frame++
     }
     if (useLookahead) for (o in framer.flush()) write((o.timestampNs / frameNs).toInt(), o.crop, o.track)
     out.close()
     System.err.println(String.format(Locale.US, "frames=%d avgMs=%.2f maxMs=%.2f", frame, totalMs / maxOf(1, frame), maxMs))
+}
+
+/** Reads one '\n'-terminated ASCII line, or null at end of stream. */
+private fun readLine(input: InputStream): String? {
+    val sb = StringBuilder()
+    while (true) {
+        val c = input.read()
+        if (c < 0) return if (sb.isEmpty()) null else sb.toString()
+        if (c == '\n'.code) return sb.toString()
+        sb.append(c.toChar())
+    }
 }
 
 private class FrameInfo(

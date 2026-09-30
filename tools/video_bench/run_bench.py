@@ -58,12 +58,8 @@ def frames(path, w, h, fmt, max_s, scale=None):
 
 def neural_detections(path, aw, ah, fps, sx, max_s, out_csv):
     import mediapipe as mp
-    from mediapipe.tasks.python import BaseOptions, vision
 
-    opts = vision.ObjectDetectorOptions(
-        base_options=BaseOptions(model_asset_path=MODEL), score_threshold=0.35, max_results=5, category_allowlist=["airplane"]
-    )
-    det = vision.ObjectDetector.create_from_options(opts)
+    det = create_detector()
     step = max(1, round(fps * 0.1))  # ~10 Hz like AnalysisEngine.neuralIntervalMs
     n = 0
     with open(out_csv, "w") as f:
@@ -80,9 +76,101 @@ def neural_detections(path, aw, ah, fps, sx, max_s, out_csv):
     return n
 
 
+def create_detector():
+    from mediapipe.tasks.python import BaseOptions, vision
+
+    opts = vision.ObjectDetectorOptions(
+        base_options=BaseOptions(model_asset_path=MODEL), score_threshold=0.35, max_results=5, category_allowlist=["airplane"]
+    )
+    return vision.ObjectDetector.create_from_options(opts)
+
+
+ROI_INPUT = 320  # the app renders zoomed detector regions at this size (EfficientDet-Lite0 input)
+
+
+def run_live(path, w, h, fps, aw, ah, max_s, cmd, roi_csv):
+    """Runs the Kotlin bench in --live mode: streams frames and answers zoomed (ROI) detection requests."""
+    import mediapipe as mp
+
+    det = create_detector()
+    p = subprocess.Popen(cmd + ["--live"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
+    results = None
+    with open(roi_csv, "w") as log:
+        log.write("frame,kind,x0,y0,x1,y1,score\n")
+        for i, rgb in enumerate(frames(path, w, h, "rgb24", max_s)):
+            gray = cv2.cvtColor(cv2.resize(rgb, (aw, ah), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+            hdr = "F -1\n" if results is None else f"F {len(results)}\n" + "".join(f"{b[0]:.1f} {b[1]:.1f} {b[2]:.1f} {b[3]:.1f} {b[4]:.3f}\n" for b in results)
+            try:
+                p.stdin.write(hdr.encode() + gray.tobytes())
+            except BrokenPipeError:
+                break
+            line = p.stdout.readline().decode().strip()
+            if not line:
+                break
+            results = None
+            if line.startswith("R"):
+                x0, y0, x1, y1 = (float(v) for v in line.split()[1:5])
+                ix0, iy0 = max(0, int(round(x0))), max(0, int(round(y0)))
+                ix1, iy1 = min(w, int(round(x1))), min(h, int(round(y1)))
+                crop = cv2.resize(rgb[iy0:iy1, ix0:ix1], (ROI_INPUT, ROI_INPUT), interpolation=cv2.INTER_AREA)
+                res = det.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(crop)))
+                kx, ky = (ix1 - ix0) / ROI_INPUT, (iy1 - iy0) / ROI_INPUT
+                results = []
+                log.write(f"{i},roi,{ix0},{iy0},{ix1},{iy1},0\n")
+                for d in res.detections:
+                    b = d.bounding_box
+                    r = (ix0 + b.origin_x * kx, iy0 + b.origin_y * ky, ix0 + (b.origin_x + b.width) * kx, iy0 + (b.origin_y + b.height) * ky, d.categories[0].score)
+                    results.append(r)
+                    log.write(f"{i},det,{r[0]:.1f},{r[1]:.1f},{r[2]:.1f},{r[3]:.1f},{r[4]:.3f}\n")
+        p.stdin.close()
+    p.wait()
+    det.close()
+    if p.returncode:
+        raise RuntimeError(f"bench failed: {p.returncode}")
+
+
 def load_csv(p):
     with open(p) as f:
         return list(csv.DictReader(f))
+
+
+def gt_metrics(rows, gt):
+    """Scores the track against dense tiled detections (gt_tiles.py): on an aircraft or not."""
+    by_frame = {}
+    for d in gt:
+        by_frame.setdefault(int(d["frame"]), []).append(d)
+
+    on = off = miss = 0
+    # Framing as the viewer sees it: the ground-truth aircraft nearest to the output center.
+    offsets = []
+    for f in by_frame:
+        if f >= len(rows):
+            continue
+        r = rows[f]
+        cx, cy, cw, ch = (float(r[k]) for k in ("cx", "cy", "cw", "ch"))
+        best = min(max(abs((float(d["x0"]) + float(d["x1"])) / 2 - cx) / (cw / 2), abs((float(d["y0"]) + float(d["y1"])) / 2 - cy) / (ch / 2))
+                   for d in by_frame[f])
+        offsets.append(best)
+        if r["state"] not in ("TRACKING", "COASTING") or float(r["tx"]) < 0:
+            miss += 1
+            continue
+        tx, ty = float(r["tx"]), float(r["ty"])
+        hit = False
+        for d in by_frame[f]:
+            x0, y0, x1, y1 = (float(d[k]) for k in ("x0", "y0", "x1", "y1"))
+            mx, my = max((x1 - x0) * 0.25, 8), max((y1 - y0) * 0.25, 8)
+            if x0 - mx <= tx <= x1 + mx and y0 - my <= ty <= y1 + my:
+                hit = True
+                break
+        on += hit
+        off += not hit
+    n = on + off + miss
+    k = len(offsets)
+    return {"gt_frames": n, "gt_on_target": round(on / n, 3) if n else None, "gt_off_target": round(off / n, 3) if n else None,
+            "gt_missed": round(miss / n, 3) if n else None,
+            "gt_center_offset": round(sorted(offsets)[k // 2], 3) if k else None,
+            "gt_in_crop": round(sum(o <= 1 for o in offsets) / k, 3) if k else None,
+            "gt_well_framed": round(sum(o <= 0.5 for o in offsets) / k, 3) if k else None}
 
 
 def metrics(rows, dets, fps, src_w):
@@ -235,7 +323,9 @@ def render(path, src_w, src_h, fps, rows, dets, max_s, out_mp4, sheet_png, sheet
         if last_dets and i - last_det_frame > fps * 0.3:
             last_dets = []  # detections are ~10 Hz; don't draw stale boxes
         for d in last_dets:
-            cv2.rectangle(wide, (int(float(d["x0"]) * k), int(float(d["y0"]) * k)), (int(float(d["x1"]) * k), int(float(d["y1"]) * k)), (80, 200, 255), 1)
+            kind = d.get("roi")
+            color = (220, 80, 255) if kind == "box" else (80, 255, 255) if kind == "1" else (80, 200, 255)
+            cv2.rectangle(wide, (int(float(d["x0"]) * k), int(float(d["y0"]) * k)), (int(float(d["x1"]) * k), int(float(d["y1"]) * k)), color, 1)
         col = COLORS[r["state"]]
         if has_t:
             tx, ty = float(r["tx"]) * k, float(r["ty"]) * k
@@ -301,6 +391,8 @@ def main():
     ap.add_argument("--tag", default="", help="suffix for output files (compare variants)")
     ap.add_argument("--bench-args", default="", help="extra arguments passed to the Kotlin bench")
     ap.add_argument("--sheet-every", type=float, default=3.0)
+    ap.add_argument("--gt-dir", default=None, help="directory with <name>.gt.csv from gt_tiles.py (default: --out)")
+    ap.add_argument("--live", action="store_true", help="zoomed (ROI) neural detection around the track, as in the app")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     summary = {}
@@ -309,10 +401,11 @@ def main():
         w, h, fps = probe(v)
         ah = round(AW * h / w / 2) * 2
         sx = w / AW
-        luma = os.path.join(a.out, name + ".gray")
-        with open(luma, "wb") as f:
-            for fr in frames(v, AW, ah, "gray", a.max_seconds, scale=True):
-                f.write(fr.tobytes())
+        luma = os.path.join(a.out, name + a.tag + ".gray")
+        if not a.live:
+            with open(luma, "wb") as f:
+                for fr in frames(v, AW, ah, "gray", a.max_seconds, scale=True):
+                    f.write(fr.tobytes())
         dets_csv = os.path.join(a.out, name + ".dets.csv")
         if a.reuse and os.path.exists(dets_csv):
             n_det = len(load_csv(dets_csv))
@@ -329,15 +422,31 @@ def main():
         if a.auto_zoom:
             cmd += ["--auto-zoom", "--zoom-min", str(a.zoom_min), "--zoom-max", str(a.zoom_max)]
         cmd += a.bench_args.split()
-        subprocess.run(cmd, check=True)
-        os.remove(luma)
+        roi_csv = os.path.join(a.out, name + a.tag + ".roi.csv")
+        if a.live:
+            run_live(v, w, h, fps, AW, ah, a.max_seconds, cmd, roi_csv)
+        else:
+            subprocess.run(cmd, check=True)
+            os.remove(luma)
         rows = load_csv(track_csv)
         dets = load_csv(dets_csv)
+        if a.live:
+            # Only the whole-frame runs the planner actually made count, plus the zoomed ones.
+            roi = load_csv(roi_csv)
+            roi_frames = {int(r["frame"]) for r in roi if r["kind"] == "roi"}
+            dets = [d for d in dets if int(d["frame"]) not in roi_frames] + [
+                dict(frame=r["frame"], x0=r["x0"], y0=r["y0"], x1=r["x1"], y1=r["y1"], score=r["score"], roi="1") for r in roi if r["kind"] == "det"]
+            m_roi = {"roi_runs": len(roi_frames), "roi_detections": sum(r["kind"] == "det" for r in roi)}
+        else:
+            roi, m_roi = [], {}
         m = metrics(rows, dets, fps, w)
-        m.update({"video": os.path.basename(v), "resolution": f"{w}x{h}@{fps:g}", "neural_detections": n_det})
+        gt_csv = os.path.join(a.gt_dir or a.out, name + ".gt.csv")
+        if os.path.exists(gt_csv):
+            m.update(gt_metrics(rows, load_csv(gt_csv)))
+        m.update({"video": os.path.basename(v), "resolution": f"{w}x{h}@{fps:g}", "neural_detections": n_det, **m_roi})
         summary[name] = m
         if not a.no_render or a.measure:
-            m.update(render(v, w, h, fps, rows, dets, a.max_seconds, os.path.join(a.out, name + a.tag + ".mp4"),
+            m.update(render(v, w, h, fps, rows, dets + [dict(r, roi="box") for r in roi if r["kind"] == "roi"], a.max_seconds, os.path.join(a.out, name + a.tag + ".mp4"),
                             os.path.join(a.out, name + a.tag + ".sheet.jpg"), a.sheet_every, write_video=not a.no_render))
         print(json.dumps(m), flush=True)
     with open(os.path.join(a.out, f"summary{a.tag}.json"), "w") as f:

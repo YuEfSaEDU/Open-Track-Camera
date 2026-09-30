@@ -17,6 +17,7 @@ import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.CropWindow
 import com.opentrack.tracking.FramingController
 import com.opentrack.tracking.LookaheadFramer
+import com.opentrack.tracking.RollingShutter
 import com.opentrack.tracking.StabilizerConfig
 import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackPrediction
@@ -55,6 +56,14 @@ class RenderPipeline(
 
     @Volatile var previewMode = PreviewMode.WIDE
 
+    /**
+     * Rolling shutter timing of the camera stream; with gyro motion the output is corrected for
+     * it (null = off, e.g. without a gyroscope: image-based motion has no per-row timing).
+     */
+    @Volatile var rollingShutter: RollingShutter? = null
+    private var shutterTs = Long.MIN_VALUE
+    private var shutter: YuvRing.ShutterCorrection? = null
+
     private val thread = HandlerThread("render").apply { start() }
     private val handler = Handler(thread.looper)
     private lateinit var egl: EglCore
@@ -62,6 +71,7 @@ class RenderPipeline(
     private lateinit var renderer: FrameRenderer
     private lateinit var lumaTarget: ReadbackTarget
     private lateinit var rgbTarget: ReadbackTarget
+    private lateinit var roiTarget: ReadbackTarget
     private var ring: YuvRing? = null
     private var texture = 0
     private var surfaceTexture: SurfaceTexture? = null
@@ -91,6 +101,7 @@ class RenderPipeline(
         renderer = FrameRenderer().also { it.displayRotationQuarterTurns = displayRotationQuarterTurns }
         lumaTarget = ReadbackTarget(analysis.width / 4, analysis.height)
         rgbTarget = ReadbackTarget(analysis.width, analysis.height)
+        roiTarget = ReadbackTarget(AnalysisEngine.ROI_SIZE, AnalysisEngine.ROI_SIZE)
         createRing()
         texture = renderer.createOesTexture()
         val st = SurfaceTexture(texture)
@@ -162,6 +173,7 @@ class RenderPipeline(
             egl.makeCurrent(pbuffer)
             lumaTarget.release()
             rgbTarget.release()
+            roiTarget.release()
             ring?.release()
             renderer.release()
             GLES20.glDeleteTextures(1, intArrayOf(texture), 0)
@@ -208,9 +220,19 @@ class RenderPipeline(
         renderer.drawPackedLuma(texture, texMatrix, analysis.width, analysis.height)
         analysis.submitLuma(lumaTarget.read(), ts)
         if (analysis.wantsNeuralFrame()) {
-            rgbTarget.bind()
-            renderer.drawRegion(texture, texMatrix, 0f, 0f, 1f, 1f, forReadback = true)
-            analysis.submitNeuralFrame(rgbTarget.read(), ts)
+            // The whole frame, or a zoomed region around the target (see DetectionPlanner).
+            val region = analysis.neuralRegion(ts)
+            val target = if (region == null) rgbTarget else roiTarget
+            target.bind()
+            if (region == null) {
+                renderer.drawRegionFiltered(texture, texMatrix, 0f, 0f, 1f, 1f, target.width, target.height)
+            } else {
+                renderer.drawRegionFiltered(
+                    texture, texMatrix, (region.left / srcW).toFloat(), (region.top / srcH).toFloat(),
+                    (region.width / srcW).toFloat(), (region.height / srcH).toFloat(), target.width, target.height,
+                )
+            }
+            analysis.submitNeuralFrame(target.read(), ts, region)
         }
 
         // 2-3. Causal (live) crop sets zoom and where to capture; keep that region in the ring.
@@ -238,7 +260,7 @@ class RenderPipeline(
             if (previewMode == PreviewMode.OUTPUT && out != null) {
                 val (x, y, cw, ch) = fit(vw, vh, out.crop.width / out.crop.height)
                 GLES20.glViewport(x, y, cw, ch)
-                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop) } }
+                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop, shutterFor(out.timestampNs)) } }
             } else {
                 val (x, y, cw, ch) = fit(vw, vh, srcW.toDouble() / srcH)
                 GLES20.glViewport(x, y, cw, ch)
@@ -268,9 +290,22 @@ class RenderPipeline(
         val slot = ring?.find(out.timestampNs) ?: return
         egl.makeCurrent(enc)
         GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
-        ring?.draw(slot, out.crop)
+        ring?.draw(slot, out.crop, shutterFor(out.timestampNs))
         egl.setPresentationTime(enc, out.timestampNs)
         egl.swap(enc)
+    }
+
+    /** Rolling shutter correction for the frame of [ts] (computed once per output frame). */
+    private fun shutterFor(ts: Long): YuvRing.ShutterCorrection? {
+        val rs = rollingShutter ?: return null
+        if (ts != shutterTs) {
+            shutterTs = ts
+            shutter = YuvRing.ShutterCorrection(
+                rs.corrections(motion, ts, YuvRing.ShutterCorrection.SAMPLES),
+                rs.readoutDir.x.toFloat(), rs.readoutDir.y.toFloat(), rs.extentPx.toFloat(), srcW / 2f, srcH / 2f,
+            )
+        }
+        return shutter
     }
 
     private fun publishOverlay(ts: Long, crop: CropWindow, prediction: TrackPrediction) {

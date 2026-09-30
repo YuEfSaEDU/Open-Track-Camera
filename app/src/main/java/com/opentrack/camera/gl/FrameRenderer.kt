@@ -16,6 +16,7 @@ import java.nio.ByteOrder
 class FrameRenderer {
     private val quad = GlUtil.floatBuffer(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
     private val display = Program(DISPLAY_FRAGMENT)
+    private val filtered = Program(FILTERED_FRAGMENT)
     private val luma = Program(LUMA_FRAGMENT)
     private val planeY = Program(PLANE_Y_FRAGMENT)
     private val planeUv = Program(PLANE_UV_FRAGMENT)
@@ -36,6 +37,16 @@ class FrameRenderer {
     /** Draws the [left, top, width, height] image region to the whole current viewport. */
     fun drawRegion(texture: Int, texMatrix: FloatArray, left: Float, top: Float, width: Float, height: Float, forReadback: Boolean = false) {
         display.draw(texture, texMatrix, left, top, width, height, forReadback, 0f, 0f)
+    }
+
+    /**
+     * Draws the [left, top, width, height] image region into the bound readback target of
+     * [outW] x [outH] pixels, box-filtered over each output pixel's footprint. A plain draw
+     * samples one point per output pixel: shrinking 4K several times makes a distant aircraft
+     * flicker or vanish between samples, which the neural detector then misses.
+     */
+    fun drawRegionFiltered(texture: Int, texMatrix: FloatArray, left: Float, top: Float, width: Float, height: Float, outW: Int, outH: Int) {
+        filtered.draw(texture, texMatrix, left, top, width, height, true, width / outW, height / outH)
     }
 
     /**
@@ -65,6 +76,7 @@ class FrameRenderer {
 
     fun release() {
         display.release()
+        filtered.release()
         luma.release()
         planeY.release()
         planeUv.release()
@@ -132,6 +144,19 @@ class FrameRenderer {
         const val DISPLAY_FRAGMENT = COMMON + """
             void main() {
                 gl_FragColor = texture2D(sTex, imgToTex(vImg));
+            }
+        """
+
+        const val FILTERED_FRAGMENT = COMMON + """
+            uniform vec2 uPx;
+            void main() {
+                vec3 acc = vec3(0.0);
+                for (int j = -1; j <= 1; j++) {
+                    for (int i = -1; i <= 1; i++) {
+                        acc += texture2D(sTex, imgToTex(vImg + vec2(float(i), float(j)) * uPx / 3.0)).rgb;
+                    }
+                }
+                gl_FragColor = vec4(acc / 9.0, 1.0);
             }
         """
 

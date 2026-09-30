@@ -193,7 +193,8 @@ class LookaheadFramer(
 
             if (t != null && t.hasTarget) {
                 val measured = t.measuredWorld
-                val q = if (c.lockToPoint && measured != null && t.timestampNs == r.ts) measured else t.worldAt(r.ts)
+                // Stabilize on the tracking point, center the aircraft (point + center offset).
+                val q = (if (c.lockToPoint && measured != null && t.timestampNs == r.ts) measured else t.worldAt(r.ts)) + t.centerOffset
                 var lead = t.velocity * c.leadTimeS
                 val maxLead = c.maxLeadFraction * r.cropW / 2
                 if (lead.length() > maxLead) lead = lead * (maxLead / lead.length())

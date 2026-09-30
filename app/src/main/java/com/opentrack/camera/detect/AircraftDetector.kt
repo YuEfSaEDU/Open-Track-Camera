@@ -20,16 +20,20 @@ import com.opentrack.tracking.DetectionSource
 class AircraftDetector private constructor(private val detector: ObjectDetector) : AutoCloseable {
 
     /**
-     * Runs detection on [bitmap] (analysis resolution). Boxes are converted to source pixels
-     * with [scale] = source px per bitmap px.
+     * Runs detection on [bitmap], an image of the source [region] (source px; the whole frame
+     * or a zoomed part of it). Boxes are returned in source pixels.
      */
-    fun detect(bitmap: Bitmap, timestampNs: Long, scale: Double): List<Detection> {
+    fun detect(bitmap: Bitmap, timestampNs: Long, region: Box): List<Detection> {
         val result = detector.detect(BitmapImageBuilder(bitmap).build())
+        val kx = region.width / bitmap.width
+        val ky = region.height / bitmap.height
         return result.detections().mapNotNull { d ->
             val category = d.categories().firstOrNull() ?: return@mapNotNull null
             val r = d.boundingBox()
             Detection(
-                box = Box.fromEdges(r.left.toDouble(), r.top.toDouble(), r.right.toDouble(), r.bottom.toDouble()).scaled(scale),
+                box = Box.fromEdges(
+                    region.left + r.left * kx, region.top + r.top * ky, region.left + r.right * kx, region.top + r.bottom * ky,
+                ),
                 score = category.score(),
                 label = category.categoryName(),
                 source = DetectionSource.NEURAL,

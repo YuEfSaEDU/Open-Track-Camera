@@ -9,11 +9,11 @@
                    └───────────────┬───────────────────────┘
                                    │ SurfaceTexture (OES doku)
             ┌──────────────────────▼──────────── render thread (GL) ──────────────────────────┐
-            │ 1. luma 640x360 (+ ~10 Hz RGBA) geri okuma ─────────────────────────────────────┼──► analysis / detector
+            │ 1. luma 640x360 + ~10 Hz RGBA (tam kare veya hedef çevresi 320x320) geri okuma ──┼──► analysis / detector
             │ 2. nedensel FramingController: zoom + canlı kırpma (önizleme, yakalama penceresi)│
             │ 3. yakalama penceresi (kırpma × 1.25) → YuvRing (Y R8 + UV RG8, D+3 yuva)         │
             │ 4. LookaheadFramer: D kare önceki karenin stabilize kırpması (kayma + roll)       │
-            │    → ring'den çiz → MediaCodec (pts = o karenin kamera zamanı) ─────────────────┼──► VideoEncoder ─► Muxer ─► MP4
+            │    → ring'den çiz (+ rolling shutter düzeltmesi) → MediaCodec (pts = kamera zamanı)─┼──► VideoEncoder ─► Muxer ─► MP4
             │ 5. önizleme (geniş: canlı / çıkış: kaydedilen), overlay                           │
             └──────────────────────────────────────────────────────────────────────────────────┘
  Jiroskop (x, y, z; ~200-500 Hz) ──► GyroMotionModel (poz: kayma + roll)        AudioEncoder ─► Muxer
@@ -25,7 +25,7 @@
 | `camera` | Camera2 istekleri, kare meta verisi (pozlama, rolling-shutter skew) | — |
 | `render` | GL: doku güncelle, analiz geri okuma, ring'e yazma, gecikmeli kırpmayı çiz (enkoder + önizleme) | < 16 ms |
 | `analysis` | (jiroskop yoksa görsel hareket) + `TargetTracker.process` her kare, gökyüzü dedektörü her 3. (takipteyken 12.) kare | < 16 ms, meşgulse kare atlanır |
-| `detector` | MediaPipe EfficientDet, ~10 Hz, asenkron | serbest |
+| `detector` | MediaPipe EfficientDet, ~10 Hz, asenkron; tam kare veya yakınlaştırılmış bölge (`DetectionPlanner`) | serbest |
 | `gyro` | Sensör örnekleri → 3 eksen açı entegrasyonu | — |
 | `video-encoder`, `audio-encoder` | MediaCodec çıktıları → muxer | — |
 
@@ -95,6 +95,22 @@ kaydı birkaç kare geciktirir.
      takipçi uçağı kendi görüntü içi hareketiyle arar ve beklenmeyen hareketi kameraya atfederek
      pozu düzeltir; uçağın dünya yolu düzgün kalır.
 
+7. **Rolling shutter düzeltmesi (`RollingShutter`, jiroskop varsa).** Sensör satırları sırayla
+   okunur (4K'da ~10–30 ms, `SENSOR_ROLLING_SHUTTER_SKEW`); kamera dönerken her satır farklı bir
+   pozla çekilir: pan'da görüntü eğilir, titremede "jöle" gibi dalgalanır. Stabilize edilip
+   büyütülünce bu belirginleşir. Karenin pozu orta satıra aittir; y satırındaki nokta
+   `t + skew·(y/H − 0.5)` anında çekilmiştir.
+   - *Çıkış*: `YuvRing` çıkış shader'ı, her çıkış pikseli için ideal (global shutter) konumdan
+     ham karedeki konuma rijit düzeltmeyi (kayma + dönme) okuma yönündeki 9 örnekten doğrusal
+     aradeğerle uygular. Örnekler jiroskop pozlarından kare başına bir kez hesaplanır.
+   - *Takip*: `TargetTracker` görüntü ↔ dünya dönüşümünü noktanın kendi satırının zamanıyla yapar;
+     hızlı pan'da uçağın dünya yolu satır konumuna göre bükülmez.
+   - Okuma yönü, sensör yönü (`SENSOR_ORIENTATION`) ve ekran dönüşünden hesaplanır (yatay tutuşta
+     yukarıdan aşağı). Jiroskop yoksa kapalıdır: görüntüden kestirilen hareketin satır zamanlaması yok.
+   - Doğrulama: `RollingShutterTest` (matematik, 0.5 px altı hata) ve `tools/shader_check`
+     (gerçek GLSL kodu, başsız Chromium WebGL2'de sentetik rolling-shutter karesinde çalıştırılır:
+     ortalama luma hatası düzeltmesiz 0.053 → düzeltmeli 0.003, yeniden örnekleme tabanı).
+
 Ön ayarlar: *uçağa kilit* (0.33 s, kilit), *hızlı* (0.2 s, yumuşaklık 0.4), *dengeli* (0.33 s, 0.6),
 *sinematik* (0.5 s, 0.8).
 Önizlemede "çıkış" görünümü kaydedilen (gecikmeli, stabilize) görüntüyü gösterir.
@@ -135,8 +151,35 @@ Yanlış kilitlenmeye karşı korumalar (gerçek videolarda bulunan hatalardan):
 - **Tutarlı onay**: tespit, çapayı yalnızca şablon eşleşmesiyle aynı yerdeyse yeniler; çelişen bir
   gökyüzü blob'u takibi değiştiremez (parlama/bulut kenarı), yalnızca sinir ağı düzeltebilir.
 - **Boyut uyumu**: ilişkilendirilen tespit, hedef boyutunun 1/2.5–2.5 katı (sinir ağı 1/4–4) olmalı.
+  Boyut yalnızca gökyüzü blob'undan geliyorsa (uçağın koyu çekirdeği) sinir ağı kutusu 8 katına kadar
+  büyük olabilir; ilk sinir ağı onayında boyut doğrudan kutudan alınır.
 - **Çözünürlükten bağımsız parametreler** (`TrackerConfig.forSource`) ve kare genişliğinin %20'si ile
   sınırlı kapı: tahmin modunda kapı tüm kareye yayılıp rastgele blob'lara atlamaz.
+
+### Yakınlaştırılmış tespit ve doğrulama (`DetectionPlanner`)
+
+SOLOTÜRK videolarında (kullanıcının kendi 4K60 çekimleri) asıl sorun buydu: tam kare 320x320'ye
+küçültülünce uzaktaki F-16 birkaç piksel kalıyor; sinir ağı 10 denemenin ancak 1–3'ünde uçağı
+buluyordu. Takip gökyüzü blob'larına kalıyor, blob dedektörü de kalabalıkta, denizde, dumanda
+yanlış hedeflere kilitlenebiliyordu ve bunu düzeltecek bir şey yoktu.
+
+- **Hedef çevresinde tespit**: hedef varken her 3 sinir ağı çalışmasından 2'si, hedefin
+  çevresindeki kare bir bölgeye bakar (kenar = max(5 × hedef boyutu, kare yüksekliğinin %15'i),
+  görülmediği her saniye büyür) — 4K'da yaklaşık 1:1 çözünürlük. Üçüncüsü tam karedir (yeni
+  uçaklar, geçersiz kılma). Bölge GPU'da 3x3 kutu filtreyle 320x320'ye çizilir.
+- **Tarama**: hedef yokken tam kareler arasında kare, yüksekliğin yarısı boyutunda karolarla taranır.
+- **Doğrulama**: sinir ağı olmayan kaynaktan (gökyüzü blob'u) başlayan takip, uçağı tanıyabilecek
+  kadar yakından bakan (hedef girişte ≥ 14 px ve kaynakta ≥ 12 px) 5 çalışmada onaylanmazsa bırakılır
+  ve o nokta 3 s yok sayılır. Onaylı bir takip de 12 çalışma boyunca onay almazsa bırakılır (dumana,
+  buluta, kalabalığa kaymıştır). Kullanıcının seçtiği hedefe uygulanmaz. Takipçi her çalışmanın
+  nereye baktığını (`NeuralRun`) bilir; "uçak değil" ile "bakılmadı" ayrılır.
+- **Onaysız takip hemen yol verir**: blob takibi sürerken sinir ağı başka yerde uçak görürse hemen
+  ona geçilir (onaylı takipte kural eskisi gibi: 4 çelişki ve 1.5 s).
+- **Duman izi**: şablon uçağın hemen yanında (genelde kendi duman izinde) eşleşmeye devam ederken
+  sinir ağı arka arkaya 2 kez çelişirse şablon, skoru yüksek olsa da yeniden tohumlanır.
+- **Sinir ağı önce**: aynı karede blob ve sinir ağı tespiti varsa ilişkilendirmede sinir ağı önceliklidir.
+- **Tahmin modunda hız sönümü**: ölçüm yokken hız 0.5 s zaman sabitiyle azalır; buluta giren uçak
+  kadrajı düz bir çizgide kare dışına sürüklemez.
 
 ### Gökyüzü dedektörü (`SkyBlobDetector`)
 
@@ -150,6 +193,8 @@ küçültülünce sinir ağı onu göremez. Oysa düz gökyüzünde çok belirgi
    ≤ 9 olmalı ("burası gökyüzü"). Pencere düz değilse (parlama şeridi, bulut kenarı) kontrast
    kestirimi güvenilmezdir.
    Ağaç, bina, kablo gibi dokulu bölgeler böylece elenir.
+5. Halka ayrıca gökyüzü kadar parlak olmalı (karenin 95. yüzdelik parlaklığının ≥ %60'ı): düz ama
+   koyu bir mont, deniz veya gölge gökyüzü değildir.
 
 GPU tarafındaki 3x3 kutu filtre, 6x küçültmede tek piksellik hedeflerin örnekleme aralığına düşüp
 kaybolmasını engeller.
@@ -233,6 +278,52 @@ görüntü içi arama ve daha sıkı zoom (doluluk 0.35, geri açılma eşiği 0
 titremeyi daha fazla piksele büyütür; bu yüzden en yakın kadrajda piksel sarsıntısı bazen artar.
 Takip oranı Jim Parker'da düştü (%78 → %69), diğerlerinde arttı.
 
+### SOLOTÜRK videoları (4K60, telefonla çekim) ve bağımsız referans
+
+Kullanıcının Antalya'da çektiği 9 SOLOTÜRK F-16 videosu (3840x2160@60, toplam ~3.5 dk): gri kapalı
+gökyüzü, çoğu zaman çok küçük hedef, alt yarıda kalabalık ve bayraklar, klip sonlarında kamera yere
+dönüyor. Önceki metrikler takipçinin kendi tespitlerine dayandığından, **bağımsız bir referans**
+eklendi: `tools/video_bench/gt_tiles.py` aynı modeli saniyede 5 kez, üst üste binen 640 px karolarda
+(tam çözünürlüğe yakın) çalıştırır; telefonda çalışamayacak kadar yavaş ama takipçiden bağımsızdır.
+Görsel kontrolde kalabalıkta yanlış pozitif yoktu. Metrikler, referansın uçak bulduğu kareler üzerinden:
+
+- *uçakta*: takip noktası bir uçak kutusunun içinde (kenar payı %25);
+- *yanlış hedefte*: takip var ama hiçbir uçağın üzerinde değil;
+- *kadrajda*: uçak (kutu merkezi) kaydedilen kırpmanın içinde;
+- *iyi kadraj*: uçak, merkeze yarım kırpma boyutunun yarısından yakın.
+
+Otomatik zoom 1–3x, uçağa kilit ön ayarı, jiroskop yok (görsel hareket), `run_bench.py --live`
+(uygulamadaki gibi yakınlaştırılmış tespit). Önceki sürüm → yeni sürüm:
+
+| Video | Uçakta | Kadrajda | İyi kadraj |
+|---|---|---|---|
+| 170136 | 33% → 94% | 39% → 94% | 36% → 94% |
+| 170426 | 24% → 80% | 39% → 93% | 26% → 78% |
+| 170554 | 61% → 91% | 61% → 93% | 59% → 91% |
+| 170741 | 53% → 84% | 74% → 85% | 50% → 76% |
+| 171348 | 53% → 71% | 73% → 98% | 55% → 79% |
+| 171638 | 63% → 92% | 64% → 94% | 64% → 94% |
+| 171811 | 33% → 70% | 43% → 97% | 27% → 53% |
+| 172002 | 48% → 86% | 54% → 100% | 44% → 80% |
+| 172109 | 2% → 96% | 9% → 96% | 0% → 80% |
+| **Ortalama** | **41% → 85%** | **51% → 94%** | **40% → 81%** |
+
+Yanlış hedefte geçen süre %58'den %10'a indi; uçağın merkezden uzaklığı (medyan) 1.33 → 0.15 yarım
+kırpma, hedef ivmesi (sarsıntı göstergesi) 76 → 24. Ortalama zoom 2.46x → 2.29x.
+
+Eski açık lisanslı videolarda (referansı anlamlı olan 4 video: Bournemouth, F-18, Jim Parker, Wings;
+Red Arrows'ta referans tüm kol uçuşunu tek kutu sayıyor, F-22'de uçak bulamadı): uçakta %69 → %79
+(Bournemouth %28 → %57, Jim Parker %67 → %82), yanlış hedefte %39 → %15 (referansı olan 5 video). Kadraj biraz geriledi:
+kadrajda %93 → %90, iyi kadraj %75 → %72 (en çok Wings: ilk kilit önce 9 px'lik bir blob'a oluyor,
+sinir ağı iki kez görünce uçağa geçiyor).
+
+SOLOTÜRK videolarında bulunan hatalar: yeniden tohumlamada görüntü içi arama çapasının
+güncellenmemesi (büyük ve net uçakta her birkaç karede bir yeniden tohumlama döngüsü), blob'dan
+başlayan takipte boyutun yalnızca uçağın koyu çekirdeği olması (doğru sinir ağı onayları boyut
+uyumsuzluğundan reddediliyordu), aynı karede blob ve sinir ağı tespiti varken blob'un seçilmesi,
+kadrajın uçağın merkezi yerine takip noktasına (ör. kokpit) ortalanması ve tahmin modunda hedefin
+düz çizgide kare dışına kaçması.
+
 ## Cihazda doğrulama listesi
 
 Bu kod bulut ortamında yazıldı; derleniyor ve `tracking` testleri geçiyor ama kamera/GL/sensör
@@ -245,6 +336,11 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
       pan/tilt testleri beklenen yönleri belgeliyor.
 - [ ] **Odak uzaklığı ölçeği**: kalan titreme hep aynı yönde ama daha küçükse `focalPx` hatalı.
 - [ ] **Zaman ofseti**: hızlı sarsıntıda kısa "geri tepme" görülürse `cameraToGyroOffsetNs` ayarı.
+- [ ] **Rolling shutter yönü**: hızlı yatay pan'da dikey çizgiler (direk, bina kenarı) çıkışta dik
+      kalmalı. Eğiklik *arttıysa* okuma yönü ters (`RollingShutter.readoutDirection`); cihaz
+      `SENSOR_ROLLING_SHUTTER_SKEW` bildirmiyorsa (0) düzeltme kapalı kalır.
+- [ ] **Yakınlaştırılmış tespit**: durum satırındaki NN süresi 320x320 bölgede tam kareden farklı
+      olmamalı; uzak uçakta takip kutusunun yeşil (onaylı) kalması.
 - [ ] Cihazın 4K60 profili seçiliyor mu (durum satırı `3840x2160@60 → 1920x1080@60`)?
 - [ ] Render ≥ 59 fps, analiz < 10 ms, NN süresi (durum satırında).
 - [ ] Kayıt: ses/görüntü senkronu, 60 fps sabit kare hızı, dosya galeride görünüyor mu.
@@ -253,18 +349,17 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
 
 Öncelik sırasına göre öneriler:
 
-1. **Rolling-shutter düzeltmesi**: hızlı pan'larda satır bazlı jiroskop warp'ı (4K sensörde okuma
-   ~15–30 ms; uçak takibinde eğilme/jöle etkisi belirgin).
-2. **Jiroskop + görüntü füzyonu**: görsel tahminle jiroskobun zaman ofseti ve odak ölçeğini cihazda
+1. **Jiroskop + görüntü füzyonu**: görsel tahminle jiroskobun zaman ofseti ve odak ölçeğini cihazda
    otomatik kalibre etmek; ikisini birleştirip kalan kaymayı gidermek.
-3. **Takipçi ölçüm kalitesi**: yeniden tohumlama sıçramaları (şablon ↔ tespit kutusu merkezi) hâlâ
+2. **Takipçi ölçüm kalitesi**: yeniden tohumlama sıçramaları (şablon ↔ tespit kutusu merkezi) hâlâ
    kalan sarsıntının ana kaynağı; kutu merkezi yerine şablon kaydı ile hizalama.
-4. **Yüksek çözünürlüklü ROI**: hedef çevresinden tam çözünürlükte geri okuma; küçük hedeflerde
-   alt-piksel hassasiyet ve ROI üzerinde sinir ağı (tile) tespiti.
-5. **Asenkron geri okuma (PBO)** ile render thread'deki `glReadPixels` beklemesini kaldırmak.
-6. **Uçak odaklı model**: uzak/küçük uçak veri setiyle eğitilmiş dedektör, sonra helikopter, drone,
+3. **Yüksek çözünürlüklü şablon**: sinir ağı artık hedef çevresine yakınlaşıyor; şablon eşleme de
+   hedef çevresinden tam çözünürlükte bir luma yaması üzerinde yapılırsa küçük hedeflerde alt-piksel
+   hassasiyet ve daha az kayma (şu an 640x360 analiz görüntüsünde).
+4. **Asenkron geri okuma (PBO)** ile render thread'deki `glReadPixels` beklemesini kaldırmak.
+5. **Uçak odaklı model**: uzak/küçük uçak veri setiyle eğitilmiş dedektör, sonra helikopter, drone,
    kuş gibi sınıflar.
-7. **Hibrit zoom**: otomatik zoom kırpma sınırına dayanınca lens zumunu kontrollü değiştirmek.
-8. **ADS-B entegrasyonu**: yakındaki uçakların konumundan hedefin ekrandaki yerini tahmin edip
+6. **Hibrit zoom**: otomatik zoom kırpma sınırına dayanınca lens zumunu kontrollü değiştirmek.
+7. **ADS-B entegrasyonu**: yakındaki uçakların konumundan hedefin ekrandaki yerini tahmin edip
    ön-kilit, kaybolunca arama yönü.
-9. Eşzamanlı ham 4K kayıt, 10-bit HEVC / log profil, tam manuel pozlama arayüzü.
+8. Eşzamanlı ham 4K kayıt, 10-bit HEVC / log profil, tam manuel pozlama arayüzü.

@@ -15,6 +15,21 @@ import kotlin.math.sin
  * encoder uses, at a third of the memory of RGBA.
  */
 class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
+    /**
+     * Rolling shutter correction for one frame (see RollingShutter.corrections): rigid
+     * (shiftX, shiftY, angle) samples along the readout, direction and extent of the readout,
+     * and the source image center, all in source px.
+     */
+    class ShutterCorrection(val samples: FloatArray, val dirX: Float, val dirY: Float, val extent: Float, val centerX: Float, val centerY: Float) {
+        init {
+            require(samples.size == SAMPLES * 3) { "need $SAMPLES samples" }
+        }
+
+        companion object {
+            const val SAMPLES = 9
+        }
+    }
+
     class Slot(val yTex: Int, val uvTex: Int, val yFbo: Int, val uvFbo: Int) {
         var timestampNs = Long.MIN_VALUE
         var capture: Box? = null
@@ -47,8 +62,11 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
 
     fun find(timestampNs: Long): Slot? = slots.firstOrNull { it.timestampNs == timestampNs }
 
-    /** Draws [crop] (source px, may be rotated) of the stored frame into the current viewport. */
-    fun draw(slot: Slot, crop: CropWindow) {
+    /**
+     * Draws [crop] (source px, may be rotated) of the stored frame into the current viewport,
+     * undoing the rolling shutter distortion with [shutter] when given.
+     */
+    fun draw(slot: Slot, crop: CropWindow, shutter: ShutterCorrection? = null) {
         val cap = slot.capture ?: return
         val c = cos(crop.rotation)
         val s = sin(crop.rotation)
@@ -57,6 +75,7 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
             ((crop.cx - cap.left) / cap.width).toFloat(), ((crop.cy - cap.top) / cap.height).toFloat(),
             (c * crop.width / cap.width).toFloat(), (s * crop.width / cap.height).toFloat(),
             (-s * crop.height / cap.width).toFloat(), (c * crop.height / cap.height).toFloat(),
+            cap, shutter,
         )
     }
 
@@ -101,8 +120,14 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
         private val uAxisY = GLES20.glGetUniformLocation(id, "uAxisY")
         private val sY = GLES20.glGetUniformLocation(id, "sY")
         private val sUv = GLES20.glGetUniformLocation(id, "sUV")
+        private val uRsOn = GLES20.glGetUniformLocation(id, "uRsOn")
+        private val uRs = GLES20.glGetUniformLocation(id, "uRs")
+        private val uCapOrigin = GLES20.glGetUniformLocation(id, "uCapOrigin")
+        private val uCapSize = GLES20.glGetUniformLocation(id, "uCapSize")
+        private val uCenter = GLES20.glGetUniformLocation(id, "uCenter")
+        private val uReadout = GLES20.glGetUniformLocation(id, "uReadout")
 
-        fun draw(slot: Slot, ox: Float, oy: Float, axx: Float, axy: Float, ayx: Float, ayy: Float) {
+        fun draw(slot: Slot, ox: Float, oy: Float, axx: Float, axy: Float, ayx: Float, ayy: Float, cap: Box, shutter: ShutterCorrection?) {
             GLES20.glUseProgram(id)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, slot.yTex)
@@ -113,6 +138,14 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
             GLES20.glUniform2f(uOrigin, ox, oy)
             GLES20.glUniform2f(uAxisX, axx, axy)
             GLES20.glUniform2f(uAxisY, ayx, ayy)
+            GLES20.glUniform1i(uRsOn, if (shutter != null) 1 else 0)
+            if (shutter != null) {
+                GLES20.glUniform3fv(uRs, ShutterCorrection.SAMPLES, shutter.samples, 0)
+                GLES20.glUniform2f(uCapOrigin, cap.left.toFloat(), cap.top.toFloat())
+                GLES20.glUniform2f(uCapSize, cap.width.toFloat(), cap.height.toFloat())
+                GLES20.glUniform2f(uCenter, shutter.centerX, shutter.centerY)
+                GLES20.glUniform3f(uReadout, shutter.dirX, shutter.dirY, shutter.extent)
+            }
             GLES20.glEnableVertexAttribArray(aPos)
             GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -137,14 +170,37 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
                     vSlot = uOrigin + uAxisX * u.x + uAxisY * u.y;
                 }
             """
+            // Rolling shutter: vSlot is where a point sits in the ideal (global shutter) frame; the
+            // sensor recorded it shifted and turned by the camera motion at its row's readout
+            // time. The rigid correction is interpolated from 9 samples along the readout.
             const val FRAGMENT = """
-                precision mediump float;
+                precision highp float;
                 uniform sampler2D sY;
                 uniform sampler2D sUV;
+                uniform int uRsOn;
+                uniform vec3 uRs[9];
+                uniform vec2 uCapOrigin;
+                uniform vec2 uCapSize;
+                uniform vec2 uCenter;
+                uniform vec3 uReadout;
                 varying highp vec2 vSlot;
+                vec2 unshutter(vec2 slot) {
+                    vec2 p = uCapOrigin + slot * uCapSize;
+                    float f = clamp(dot(p - uCenter, uReadout.xy) / uReadout.z + 0.5, 0.0, 1.0) * 8.0;
+                    vec3 r = uRs[0];
+                    for (int i = 0; i < 8; i++) {
+                        if (float(i) <= f) r = mix(uRs[i], uRs[i + 1], clamp(f - float(i), 0.0, 1.0));
+                    }
+                    vec2 d = p - uCenter;
+                    float c = cos(r.z);
+                    float s = sin(r.z);
+                    vec2 raw = uCenter + vec2(c * d.x - s * d.y, s * d.x + c * d.y) + r.xy;
+                    return (raw - uCapOrigin) / uCapSize;
+                }
                 void main() {
-                    float y = texture2D(sY, vSlot).r;
-                    vec2 c = texture2D(sUV, vSlot).rg - 0.5;
+                    vec2 at = uRsOn == 1 ? unshutter(vSlot) : vSlot;
+                    float y = texture2D(sY, at).r;
+                    vec2 c = texture2D(sUV, at).rg - 0.5;
                     gl_FragColor = vec4(y + 1.402 * c.y, y - 0.344136 * c.x - 0.714136 * c.y, y + 1.772 * c.x, 1.0);
                 }
             """

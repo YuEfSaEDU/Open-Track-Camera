@@ -44,6 +44,13 @@ class KalmanCv1D(var accelNoise: Double) {
         p11 = n11
     }
 
+    /** Scales the velocity (and its uncertainty) by [factor], e.g. to let an unobserved target slow down. */
+    fun dampVelocity(factor: Double) {
+        velocity *= factor
+        p01 *= factor
+        p11 *= factor * factor
+    }
+
     /** Fuses a position measurement with variance [measurementVariance]. Returns the innovation. */
     fun update(measurement: Double, measurementVariance: Double): Double {
         val innovation = measurement - position

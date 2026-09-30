@@ -33,6 +33,7 @@ import com.opentrack.camera.ui.OverlayView
 import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.FramingController
 import com.opentrack.tracking.GyroMotionModel
+import com.opentrack.tracking.RollingShutter
 import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackState
 import com.opentrack.tracking.TrackerConfig
@@ -54,6 +55,7 @@ class MainActivity : AppCompatActivity() {
     private var analysis: AnalysisEngine? = null
     private var gyro: GyroSource? = null
     private var gyroModel: GyroMotionModel? = null
+    private var tracker: TargetTracker? = null
     private var recorder: Recorder? = null
     private var previewSurface: Surface? = null
 
@@ -204,12 +206,13 @@ class MainActivity : AppCompatActivity() {
             motion,
             TrackerConfig.forSource(srcW, hasGyro = g.available).copy(autoAcquire = autoLock, imageSpaceSearch = true),
         )
+        this.tracker = tracker
         val detector = AircraftDetector.create(this)
         if (detector == null) Toast.makeText(this, R.string.no_neural, Toast.LENGTH_SHORT).show()
 
         val analysisW = 640
         val analysisH = ((analysisW.toDouble() * srcH / srcW) / 2).roundToInt() * 2
-        val engine = AnalysisEngine(tracker, detector, visual, analysisW, analysisH, srcW.toDouble() / analysisW).also { it.mode = detectorMode }
+        val engine = AnalysisEngine(tracker, detector, visual, motion, analysisW, analysisH, srcW.toDouble() / analysisW).also { it.mode = detectorMode }
         analysis = engine
 
         val framing = FramingController(srcW, srcH, outputWidth.toDouble() / outputHeight, motion).also {
@@ -244,6 +247,7 @@ class MainActivity : AppCompatActivity() {
             override fun onFrameMetadata(timestampNs: Long, exposureNs: Long, rollingShutterSkewNs: Long) {
                 // Compare against the gyro at the middle of the exposure of the middle row.
                 model.cameraToGyroOffsetNs = clockOffsetNs + rollingShutterSkewNs / 2 + exposureNs / 2
+                updateRollingShutter(p, rollingShutterSkewNs)
             }
 
             override fun onError(message: String) {
@@ -255,6 +259,26 @@ class MainActivity : AppCompatActivity() {
         camera = cam
     }
 
+    /**
+     * Rolling shutter correction needs per-row camera motion, i.e. the gyro. The skew is
+     * reported per frame but rarely changes; the model is only replaced when it does.
+     */
+    private fun updateRollingShutter(p: CameraProfile, skewNs: Long) {
+        val rp = pipeline ?: return
+        if (gyro?.available != true || skewNs <= 0) {
+            rp.rollingShutter = null
+            tracker?.rollingShutter = null
+            return
+        }
+        val current = rp.rollingShutter
+        if (current != null && kotlin.math.abs(current.skewNs - skewNs) < 200_000L) return
+        val dir = RollingShutter.readoutDirection(p.sensorOrientation, display?.rotation ?: Surface.ROTATION_90)
+        val extent = if (dir.x != 0.0) p.sourceSize.width.toDouble() else p.sourceSize.height.toDouble()
+        val rs = RollingShutter(skewNs, dir, extent)
+        rp.rollingShutter = rs
+        tracker?.rollingShutter = rs
+    }
+
     private fun stopPipeline() {
         if (recorder?.isRecording == true) stopRecording(blocking = true)
         camera?.close()
@@ -263,6 +287,7 @@ class MainActivity : AppCompatActivity() {
         gyro = null
         pipeline?.release()
         pipeline = null
+        tracker = null
         analysis?.release()
         analysis = null
     }

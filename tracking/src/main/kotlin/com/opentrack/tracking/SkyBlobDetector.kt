@@ -22,6 +22,11 @@ class SkyBlobDetector(
     private val maxArea: Int = 900,
     /** Maximum std-dev (gray levels) of the ring around a blob for it to count as "sky". */
     private val maxRingStd: Double = 9.0,
+    /**
+     * The ring must also be about as bright as the sky: at least this fraction of the frame's
+     * 95th percentile luma. A smooth dark coat, the sea or a shadow is not sky, however smooth.
+     */
+    private val minSkyBrightness: Double = 0.6,
     private val maxResults: Int = 8,
 ) {
     // Scratch buffers reused across frames (the detector runs many times per second).
@@ -31,6 +36,7 @@ class SkyBlobDetector(
     private var labels = IntArray(0)
     private var stack = IntArray(0)
     private val histogram = IntArray(256)
+    private val lumaHistogram = IntArray(256)
 
     /** Not thread safe: scratch buffers are shared between calls. */
     fun detect(frame: LumaFrame): List<Detection> {
@@ -47,6 +53,7 @@ class SkyBlobDetector(
             labels.fill(0)
         }
         histogram.fill(0)
+        lumaHistogram.fill(0)
         val integral = integral
         val integralSq = integralSq
         val diff = diff
@@ -64,7 +71,9 @@ class SkyBlobDetector(
                 val x1 = min(w, x + r + 1)
                 val area = (x1 - x0) * (y1 - y0)
                 val mean = rectSum(integral, w, x0, y0, x1, y1) / area
-                val d = frame.at(x, y) - mean.toInt()
+                val v = frame.at(x, y)
+                lumaHistogram[v]++
+                val d = v - mean.toInt()
                 diff[y * w + x] = d
                 histogram[min(255, abs(d))]++
             }
@@ -72,6 +81,7 @@ class SkyBlobDetector(
         // Median absolute deviation as a robust noise estimate (most pixels are background).
         val median = percentile(histogram, n, 0.5)
         val threshold = max(minContrast.toDouble(), noiseFactor * 1.4826 * max(1, median))
+        val minRingMean = minSkyBrightness * percentile(lumaHistogram, n, 0.95)
 
         val out = ArrayList<Detection>()
         var nextLabel = 1
@@ -120,8 +130,9 @@ class SkyBlobDetector(
             if (area.toDouble() / (bw * bh) < 0.2) continue // thin/irregular: cloud edge, wire...
 
             // Ring between 2x and 3x the blob size must be smooth sky.
-            val ringStd = ringStd(integral, integralSq, w, h, minX, minY, maxX + 1, maxY + 1)
-            if (ringStd > maxRingStd) continue
+            ring(integral, integralSq, w, h, minX, minY, maxX + 1, maxY + 1)
+            val ringStd = ringStd
+            if (ringStd > maxRingStd || ringMean < minRingMean) continue
 
             val cx = wx / wSum
             val cy = wy / wSum
@@ -139,7 +150,11 @@ class SkyBlobDetector(
         return out.sortedByDescending { it.score }.take(maxResults)
     }
 
-    private fun ringStd(ii: LongArray, iiSq: LongArray, w: Int, h: Int, x0: Int, y0: Int, x1: Int, y1: Int): Double {
+    private var ringMean = 0.0
+    private var ringStd = 0.0
+
+    /** Mean and std-dev of the background ring around a blob, into [ringMean] / [ringStd]. */
+    private fun ring(ii: LongArray, iiSq: LongArray, w: Int, h: Int, x0: Int, y0: Int, x1: Int, y1: Int) {
         val bw = x1 - x0
         val bh = y1 - y0
         fun expand(k: Double, minMargin: Int): IntArray {
@@ -154,9 +169,13 @@ class SkyBlobDetector(
         val sum = rectSum(ii, w, outer[0], outer[1], outer[2], outer[3]) - rectSum(ii, w, inner[0], inner[1], inner[2], inner[3])
         val sumSq = rectSum(iiSq, w, outer[0], outer[1], outer[2], outer[3]) - rectSum(iiSq, w, inner[0], inner[1], inner[2], inner[3])
         val count = (outer[2] - outer[0]) * (outer[3] - outer[1]) - (inner[2] - inner[0]) * (inner[3] - inner[1])
-        if (count <= 0) return Double.MAX_VALUE
-        val mean = sum.toDouble() / count
-        return sqrt(max(0.0, sumSq.toDouble() / count - mean * mean))
+        if (count <= 0) {
+            ringMean = 0.0
+            ringStd = Double.MAX_VALUE
+            return
+        }
+        ringMean = sum.toDouble() / count
+        ringStd = sqrt(max(0.0, sumSq.toDouble() / count - ringMean * ringMean))
     }
 
     private fun buildIntegrals(frame: LumaFrame, ii: LongArray, iiSq: LongArray) {

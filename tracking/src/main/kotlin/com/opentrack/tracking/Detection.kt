@@ -10,3 +10,10 @@ data class Detection(
     val source: DetectionSource,
     val timestampNs: Long,
 )
+
+/**
+ * A completed neural detector run, reported even when it found nothing: which part of the
+ * frame of [timestampNs] it looked at ([region] in source px, null = the whole frame) and at
+ * what input size. The tracker uses it to tell "not an aircraft" from "not looked at".
+ */
+data class NeuralRun(val timestampNs: Long, val region: Box?, val inputPx: Int = 320)

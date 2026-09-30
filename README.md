@@ -23,7 +23,10 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
 - **Hibrit hedef tespiti**
   - Sinir ağı: MediaPipe EfficientDet-Lite0 (COCO `airplane` sınıfı), ~10 Hz, asenkron.
   - Gökyüzü dedektörü: düz gökyüzünde birkaç piksellik uzak uçakları bulan klasik yöntem
-    (yerel arka plan farkı + sakin halka testi). Sinir ağının göremediği küçük hedefler için.
+    (yerel arka plan farkı + sakin ve parlak halka testi). Sinir ağının göremediği küçük hedefler için.
+  - **Yakınlaştırılmış tespit**: hedef varken sinir ağı çoğunlukla hedefin çevresine (4K'da ~1:1)
+    bakar, hedef yokken kareyi karolarla tarar. Gökyüzü dedektörünün bulduğu her şey sinir ağıyla
+    **doğrulanır**; tanınmayan (kalabalık, deniz, duman) takip bırakılır.
 - **60 fps takip**: NCC şablon eşleme (alt-piksel), sabit hız Kalman filtresi, kaybolunca tahminle
   devam (coasting) ve tespitlerle yeniden yakalama.
 - **İleriye bakan stabilizasyon** (DaVinci Resolve'un yaklaşımının gerçek zamanlı hali):
@@ -31,7 +34,9 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   (0.2–0.5 s) geciktirilir ve kamera yolu geçmiş + gelecek kareler görülerek optimize edilir
   (hız/ivme/sarsıntı cezası, kırpma ve hedef kısıtları). Kayma ve **roll (ufuk)** birlikte düzeltilir.
   Geçmiş kareler GPU'da YUV halka tamponda tutulur. Hedef yokken normal EIS gibi çalışır.
-  Ön ayarlar: hızlı / dengeli / sinematik.
+  Ön ayarlar: uçağa kilit / hızlı / dengeli / sinematik.
+- **Rolling shutter düzeltmesi**: jiroskopla her satırın okunma anındaki kamera pozu hesaplanır;
+  pan'daki eğilme ve titremedeki "jöle" etkisi kayıtta GPU'da düzeltilir.
 - **Uçak fotoğrafçılığı ayarları**: sonsuza sabit odak (gökyüzünde AF aramasını önler), EV,
   hızlı enstantane (≈1/1000 s, ISO otomatik türetilir), OIS açık / kamera EIS kapalı.
 - **Otomatik zoom**: kullanıcının belirlediği min/max sınırlar içinde hedefi çıkışta sabit boyutta
@@ -59,8 +64,14 @@ Minimum Android 11 (API 30). 4K60 için cihazın arka kamerasının `SurfaceText
 pip install imageio-ffmpeg numpy opencv-python-headless mediapipe
 ./gradlew :bench:installDist
 python3 tools/video_bench/run_bench.py video1.mp4 video2.webm --out bench_out --auto-zoom --zoom-min 1 --zoom-max 3
+# uygulamadaki gibi yakınlaştırılmış (ROI) sinir ağı tespitiyle:
+python3 tools/video_bench/run_bench.py video1.mp4 --out bench_out --auto-zoom --live
+# bağımsız referans (yoğun, karo karo tam çözünürlük tespit) → gt_* metrikleri:
+python3 tools/video_bench/gt_tiles.py video1.mp4 --out bench_out
 # eski (nedensel) kadrajla karşılaştırma:
 python3 tools/video_bench/run_bench.py video1.mp4 --out bench_out --auto-zoom --tag _old --bench-args "--stabilizer old --motion none"
+# rolling shutter shader'ı (başsız Chromium WebGL2):
+NODE_PATH=$(npm root -g) node tools/shader_check/rolling_shutter.mjs
 ```
 
 Her video için `bench_out/` altında takip CSV'si, metrikler (`summary.json`: takip oranları, giriş/çıkış
@@ -75,6 +86,7 @@ görüntüden tahmin edilir.
 |---|---|
 | `tracking/` | Saf Kotlin/JVM: Kalman, NCC takipçi, gökyüzü dedektörü, jiroskop hareket modeli, kadraj kontrolcüsü. Cihazsız test edilir. |
 | `bench/` + `tools/video_bench/` | Gerçek videolarda test: aynı Kotlin takip kodu + MediaPipe dedektörü, metrikler ve yan yana karşılaştırma videosu. |
+| `tools/shader_check/` | Uygulamanın GLSL kodunu tarayıcıda (WebGL2) sentetik verilerle doğrular. |
 | `app/` | Android: Camera2, OpenGL ES render hattı, MediaPipe dedektörü, MediaCodec/MediaMuxer kayıt, arayüz. |
 
 Ayrıntılı tasarım, koordinat sistemleri ve yol haritası: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

@@ -1,5 +1,6 @@
 package com.opentrack.tracking
 
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -36,8 +37,17 @@ data class TrackPrediction(
      * only predicted. Framing can lock to it: this is what a point tracker stabilizes on.
      */
     val measuredWorld: Vec2? = null,
+    /**
+     * From the tracking point to the aircraft's center (source px, slowly varying): the point is
+     * where the template sits (often the dark core the track started on); framing centers
+     * the aircraft while stabilizing on the point.
+     */
+    val centerOffset: Vec2 = Vec2.ZERO,
 ) {
     val hasTarget: Boolean get() = state == TrackState.TRACKING || state == TrackState.COASTING
+
+    /** Where framing should put the output center: the aircraft's center at [timestampNs]. */
+    fun framingAt(timestampNs: Long): Vec2 = worldAt(timestampNs) + centerOffset
 
     fun worldAt(timestampNs: Long): Vec2 {
         val dt = (timestampNs - this.timestampNs) * 1e-9
@@ -96,6 +106,27 @@ data class TrackerConfig(
     val imageSpaceSearch: Boolean = false,
     /** Upper bound of the association gate as a fraction of the frame width. */
     val maxGateFraction: Double = 0.2,
+    /**
+     * Verification: a track not started from a neural detection (a sky blob) is dropped when
+     * this many neural runs that looked at it closely enough to recognize an aircraft found
+     * none there...
+     */
+    val verifyRuns: Int = 5,
+    /** ...and a neural-confirmed one after this many (it drifted onto smoke, a cloud, the crowd). */
+    val reverifyRuns: Int = 12,
+    /** Smallest object (px in the detector's input) the neural detector is expected to recognize... */
+    val minRecognizablePx: Double = 14.0,
+    /** ...and in source px (an upscaled handful of pixels is still unrecognizable). */
+    val minRecognizableSourcePx: Double = 12.0,
+    /** A rejected spot is not acquired again for this long. */
+    val rejectBlacklistNs: Long = 3_000_000_000L,
+    /** Neural detections disagreeing with the template this many times in a row force a re-seed. */
+    val inconsistentReseedCount: Int = 2,
+    /**
+     * While coasting, the extrapolated velocity decays with this time constant: an aircraft
+     * gone into a cloud or out of frame should not drag the framing along a straight line.
+     */
+    val coastVelocityDecayS: Double = 0.5,
 ) {
     companion object {
         /**
@@ -131,6 +162,13 @@ class TargetTracker(
     var prediction: TrackPrediction = TrackPrediction.IDLE
         private set
 
+    /**
+     * Rolling shutter timing of the analysed frames; when set (gyro motion only), image
+     * positions are converted with the camera pose at their own row's readout time.
+     */
+    @Volatile
+    var rollingShutter: RollingShutter? = null
+
     /** Most recent detections, for UI and tap-to-select. */
     @Volatile
     var latestDetections: List<Detection> = emptyList()
@@ -164,8 +202,20 @@ class TargetTracker(
     /** Tracking point relative to the detection box center, in units of the box size. */
     private var pointOffset = Vec2.ZERO
     private var pointOffsetValid = false
+    /** [TrackPrediction.centerOffset], smoothed more than [pointOffset] (it moves the framing). */
+    private var centerOffset = Vec2.ZERO
     private var neuralDisagreements = 0
     private var lastNeuralConfirmNs = Long.MIN_VALUE / 2
+    /** A neural detection has confirmed this track (or the user picked it). */
+    private var verified = false
+    /** Neural runs that should have recognized the target since its last confirmation, but did not. */
+    private var unconfirmedRuns = 0
+    private var inconsistentNeural = 0
+    /** The tracked size comes from a neural box (not only from a sky blob, i.e. the dark core). */
+    private var sizeFromNeural = false
+    private var confirmedThisFrame = false
+    private class Rejected(val world: Vec2, val radius: Double, val untilNs: Long)
+    private val rejected = ArrayList<Rejected>()
 
     /** Requests a target at [point] (image source px, on the latest frame). Applied on the next frame. */
     fun selectAt(point: Vec2) {
@@ -176,8 +226,13 @@ class TargetTracker(
         pendingClear = true
     }
 
-    fun process(frame: LumaFrame, detections: List<Detection>): TrackPrediction {
+    /**
+     * @param neuralRuns neural runs whose results are part of [detections] (possibly none),
+     *   used to verify tracks; empty when unknown (then tracks are never rejected).
+     */
+    fun process(frame: LumaFrame, detections: List<Detection>, neuralRuns: List<NeuralRun> = emptyList()): TrackPrediction {
         val t = frame.timestampNs
+        rejected.removeAll { it.untilNs <= t }
         frameWidthPx = frame.width * frame.scale
         frameCenter = Vec2(frameWidthPx / 2, frame.height * frame.scale / 2)
         updateLatestDetections(detections, t)
@@ -197,12 +252,17 @@ class TargetTracker(
             val box = det?.let { projectDetection(it, t, null) } ?: Box(tap.x, tap.y, config.defaultTapBoxPx, config.defaultTapBoxPx)
             startTrack(frame, box)
             userSelected = true
+            verified = true
+            sizeFromNeural = det?.source == DetectionSource.NEURAL
             return publish(t)
         }
 
         when (state) {
             TrackState.IDLE -> if (config.autoAcquire) acquire(frame, detections, null)
-            TrackState.TRACKING, TrackState.COASTING -> step(frame, detections)
+            TrackState.TRACKING, TrackState.COASTING -> {
+                step(frame, detections)
+                verify(frame, neuralRuns)
+            }
             TrackState.LOST -> {
                 predictTo(t)
                 // Near the last position first; after a while anything the auto lock would take.
@@ -225,6 +285,8 @@ class TargetTracker(
 
     private fun step(frame: LumaFrame, detections: List<Detection>) {
         val t = frame.timestampNs
+        confirmedThisFrame = false
+        val frameDt = (t - filterTimeNs) * 1e-9
         predictTo(t)
         val s = frame.scale
         // Without a trustworthy camera pose for this frame (featureless sky), search around the
@@ -273,14 +335,24 @@ class TargetTracker(
             confidence *= 0.9
         }
 
-        val det = associate(detections, t)
+        // Neural detections first: they are what confirms (verifies) the track.
+        val det = associate(detections.filter { it.source == DetectionSource.NEURAL }, t) ?: associate(detections, t)
         if (det != null) {
             val box = projectDetection(det, t, Vec2(fx.velocity, fy.velocity))
             // Does the detection agree with where the template matched?
             val consistent = measured && (box.center - match!!.center * s).length() <= max(2 * s, 0.5 * max(box.width, box.height))
-            if (consistent || !measured) {
+            if ((consistent || !measured) && det.source == DetectionSource.NEURAL && !sizeFromNeural) {
+                // First neural box: the blob only measured the aircraft's dark core.
+                width = box.width
+                height = box.height
+                sizeFromNeural = true
+            } else if (consistent || !measured) {
                 width += (box.width - width) * config.sizeSmoothing
                 height += (box.height - height) * config.sizeSmoothing
+            }
+            if (det.source == DetectionSource.NEURAL) {
+                inconsistentNeural = if (consistent || !measured) 0 else inconsistentNeural + 1
+                if (consistent) confirmNeural(t)
             }
             if (consistent) {
                 // A detector confirmed the track: refresh the drift anchor where the template is
@@ -291,14 +363,18 @@ class TargetTracker(
                 val size = max(box.width, box.height)
                 val rel = (match.center * s - box.center) / size
                 pointOffset = if (pointOffsetValid) pointOffset + (rel - pointOffset) * 0.2 else rel
+                val toCenter = (box.center - match.center * s)
+                centerOffset = if (pointOffsetValid) centerOffset + (toCenter - centerOffset) * 0.1 else toCenter
                 pointOffsetValid = true
                 lastEvent = "confirm:${det.source}"
             }
             // Re-seed when the template lost the target, or when the neural detector (more
             // trustworthy than sky blobs, which also fire on cloud edges and glare) disagrees
-            // with a weak match.
+            // with a weak match, or keeps disagreeing with a good one (a template matching next
+            // to the aircraft, typically on its own smoke trail).
             val reseed = !measured ||
-                (!consistent && det.source == DetectionSource.NEURAL && match!!.score < config.reseedScore)
+                (!consistent && det.source == DetectionSource.NEURAL &&
+                    (match!!.score < config.reseedScore || inconsistentNeural >= config.inconsistentReseedCount))
             if (reseed) {
                 val point = trackingPoint(box)
                 val z = toWorld(point, t)
@@ -308,7 +384,17 @@ class TargetTracker(
                 fx.update(z.x, r)
                 fy.update(z.y, r)
                 template.init(frame, box.movedTo(point).scaled(1 / s))
+                // The image-space search continues from here (not from the stale last match).
+                if (lastImageNs != Long.MIN_VALUE && t > lastImageNs && t - lastImageNs < 250_000_000L) {
+                    imageVelocity = (point - lastImage) / ((t - lastImageNs) * 1e-9)
+                }
+                lastImage = point
+                lastImageNs = t
                 lastEvent = "reseed:${det.source}"
+                if (det.source == DetectionSource.NEURAL) {
+                    confirmNeural(t)
+                    inconsistentNeural = 0
+                }
                 lastSeenNs = t
                 confidence = det.score.toDouble()
                 state = TrackState.TRACKING
@@ -317,6 +403,11 @@ class TargetTracker(
 
         checkNeuralOverride(frame, detections)
 
+        if (lastSeenNs != t && frameDt > 0) {
+            val k = exp(-frameDt / config.coastVelocityDecayS)
+            fx.dampVelocity(k)
+            fy.dampVelocity(k)
+        }
         if (state == TrackState.TRACKING && lastSeenNs != t) state = TrackState.COASTING
         if (state == TrackState.COASTING && t - lastSeenNs > config.maxCoastNs) state = TrackState.LOST
     }
@@ -336,13 +427,18 @@ class TargetTracker(
             return
         }
         neuralDisagreements++
-        if (config.autoAcquire && !userSelected &&
-            neuralDisagreements >= config.neuralOverrideCount &&
-            t - lastNeuralConfirmNs > config.neuralOverrideNs
-        ) {
+        // An unverified track (a sky blob nothing has recognized yet) yields quickly to an
+        // aircraft the network keeps seeing (twice: single false positives happen); a
+        // verified one only after repeated disagreement.
+        val override = if (verified) {
+            neuralDisagreements >= config.neuralOverrideCount && t - lastNeuralConfirmNs > config.neuralOverrideNs
+        } else neuralDisagreements >= 2
+        if (config.autoAcquire && !userSelected && override) {
             val best = neural.maxBy { it.score }
             startTrack(frame, projectDetection(best, t, null))
             lastNeuralConfirmNs = t
+            verified = true
+            sizeFromNeural = true
             lastEvent = "switch:NEURAL"
         }
     }
@@ -350,7 +446,10 @@ class TargetTracker(
     /** Picks a detection to (re)start tracking. With [gate] set, only near the extrapolated track. */
     private fun acquire(frame: LumaFrame, detections: List<Detection>, gate: Double?): Boolean {
         val t = frame.timestampNs
-        val candidates = detections.filter { it.source == DetectionSource.NEURAL || config.acquireFromSkyBlobs }
+        val candidates = detections.filter { d ->
+            (d.source == DetectionSource.NEURAL || config.acquireFromSkyBlobs) &&
+                rejected.none { (toWorld(projectDetection(d, t, null).center, t) - it.world).length() < it.radius }
+        }
         val chosen = if (gate != null) {
             val predicted = Vec2(fx.position, fy.position)
             candidates.map { it to (toWorld(projectDetection(it, t, null).center, t) - predicted).length() }
@@ -360,7 +459,47 @@ class TargetTracker(
             candidates.maxByOrNull { it.score + if (it.source == DetectionSource.NEURAL) 1f else 0f }
         } ?: return false
         startTrack(frame, projectDetection(chosen, t, null))
+        verified = chosen.source == DetectionSource.NEURAL
+        sizeFromNeural = verified
+        if (verified) lastNeuralConfirmNs = t
         return true
+    }
+
+    private fun confirmNeural(t: Long) {
+        verified = true
+        unconfirmedRuns = 0
+        confirmedThisFrame = true
+        lastNeuralConfirmNs = t
+    }
+
+    /**
+     * Counts neural runs that looked at the target closely enough to recognize an aircraft and
+     * did not confirm it; too many and the track is dropped, and the spot ignored for a while.
+     * This is what keeps a sky-blob lock on a person, a bag or a boat from sticking, and what
+     * ends a track that slid onto smoke. Never applied to a target the user picked.
+     */
+    private fun verify(frame: LumaFrame, runs: List<NeuralRun>) {
+        if (runs.isEmpty() || userSelected || !state.let { it == TrackState.TRACKING || it == TrackState.COASTING }) return
+        if (confirmedThisFrame) return
+        val t = frame.timestampNs
+        val size = max(width, height)
+        for (run in runs) {
+            val at = toImage(Vec2(fx.position, fy.position), run.timestampNs)
+            val region = run.region ?: Box(frameCenter.x, frameCenter.y, frameWidthPx, frameCenter.y * 2)
+            if (!region.contains(at)) continue
+            // Size of the target in the detector's input; upscaling adds no detail, so a
+            // target also needs enough source pixels (e.g. a few px blob in a 480p video).
+            val inputSize = size * run.inputPx / max(region.width, region.height)
+            if (inputSize >= config.minRecognizablePx && size >= config.minRecognizableSourcePx) unconfirmedRuns++
+        }
+        val limit = if (verified) config.reverifyRuns else config.verifyRuns
+        if (unconfirmedRuns >= limit) {
+            val world = Vec2(fx.position, fy.position)
+            rejected += Rejected(world, max(size * 2, 0.05 * frameWidthPx), t + config.rejectBlacklistNs)
+            lastEvent = if (verified) "reject:stale" else "reject:unverified"
+            state = TrackState.IDLE
+            template.reset()
+        }
     }
 
     private fun isGood(m: TemplateTracker.Match?): Boolean =
@@ -382,13 +521,18 @@ class TargetTracker(
         lastSeenNs = t
         width = box.width
         height = box.height
+        sizeFromNeural = false
         confidence = 1.0
         template.init(frame, box.scaled(1 / frame.scale))
         state = TrackState.TRACKING
         userSelected = false
+        verified = false
+        unconfirmedRuns = 0
+        inconsistentNeural = 0
         neuralDisagreements = 0
         pointOffset = Vec2.ZERO
         pointOffsetValid = false
+        centerOffset = Vec2.ZERO
         lastImage = box.center
         lastImageNs = t
         imageVelocity = Vec2.ZERO
@@ -426,13 +570,17 @@ class TargetTracker(
         val tracked = max(width, height)
         if (tracked <= 0) return true
         val ratio = max(d.box.width, d.box.height) / tracked
-        val tol = if (d.source == DetectionSource.NEURAL) config.neuralSizeTolerance else config.skySizeTolerance
+        // A sky blob is only the aircraft's dark core; its full neural box can be much larger.
+        val tol = if (d.source != DetectionSource.NEURAL) config.skySizeTolerance
+        else if (sizeFromNeural) config.neuralSizeTolerance else config.neuralSizeTolerance * 2
         return ratio in (1 / tol)..tol
     }
 
-    private fun toWorld(image: Vec2, t: Long) = motion.poseAt(t).toWorld(image, frameCenter)
+    private fun toWorld(image: Vec2, t: Long): Vec2 =
+        rollingShutter?.toWorld(motion, image, t, frameCenter) ?: motion.poseAt(t).toWorld(image, frameCenter)
 
-    private fun toImage(world: Vec2, t: Long) = motion.poseAt(t).toImage(world, frameCenter)
+    private fun toImage(world: Vec2, t: Long): Vec2 =
+        rollingShutter?.toImage(motion, world, t, frameCenter) ?: motion.poseAt(t).toImage(world, frameCenter)
 
     private fun gateFor(t: Long): Double {
         val sigma = sqrt(max(fx.positionVariance, fy.positionVariance))
@@ -464,6 +612,7 @@ class TargetTracker(
                 confidence = confidence,
                 lastMeasuredNs = lastSeenNs,
                 measuredWorld = if (measurementNs == t && state != TrackState.LOST) measurement else null,
+                centerOffset = centerOffset,
             )
         }
         prediction = p
