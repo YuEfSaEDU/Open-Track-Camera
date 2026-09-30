@@ -309,7 +309,9 @@ Otomatik zoom 1–3x, uçağa kilit ön ayarı, jiroskop yok (görsel hareket), 
 | **Ortalama** | **41% → 85%** | **51% → 94%** | **40% → 81%** |
 
 Yanlış hedefte geçen süre %58'den %10'a indi; uçağın merkezden uzaklığı (medyan) 1.33 → 0.15 yarım
-kırpma, hedef ivmesi (sarsıntı göstergesi) 76 → 24. Ortalama zoom 2.46x → 2.29x.
+kırpma, hedef ivmesi (sarsıntı göstergesi) 76 → 24. Ortalama zoom 2.46x → 2.29x. Çıkışta uçağın
+yüksek frekanslı titremesi (3 videoda ölçüldü, 1080p px) 346 → 115, 170 → 81, 191 → 136; arka planın
+sarsıntısı değişmedi (+%1–8; önceki sürüm çoğu zaman kalabalığı kaydediyordu).
 
 Eski açık lisanslı videolarda (referansı anlamlı olan 4 video: Bournemouth, F-18, Jim Parker, Wings;
 Red Arrows'ta referans tüm kol uçuşunu tek kutu sayıyor, F-22'de uçak bulamadı): uçakta %69 → %79
