@@ -13,6 +13,8 @@ import com.opentrack.tracking.SkyBlobDetector
 import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackState
 import com.opentrack.tracking.Vec2
+import com.opentrack.tracking.VisualMotionEstimator
+import com.opentrack.tracking.Box
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -27,6 +29,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 class AnalysisEngine(
     private val tracker: TargetTracker,
     private val neural: AircraftDetector?,
+    /** Camera motion from the image, used when the device has no gyroscope (null otherwise). */
+    private val visualMotion: VisualMotionEstimator?,
     val width: Int,
     val height: Int,
     /** Source px per analysis px. */
@@ -42,6 +46,8 @@ class AnalysisEngine(
         private set
 
     private val skyBlob = SkyBlobDetector()
+    private val sourceCenter = Vec2(width * scale / 2, height * scale / 2)
+    private var lastTargetBox: Box? = null
     private val thread = HandlerThread("analysis").apply { start() }
     private val handler = Handler(thread.looper)
     private val detectorExecutor = Executors.newSingleThreadExecutor { Thread(it, "detector") }
@@ -97,7 +103,13 @@ class AnalysisEngine(
             val skyEvery = if (tracking) 12 else 3
             if (mode != Mode.NEURAL_ONLY && frameIndex % skyEvery == 0L) detections += skyBlob.detect(frame)
             frameIndex++
-            tracker.process(frame, detections)
+            visualMotion?.process(frame, lastTargetBox)
+            val p = tracker.process(frame, detections)
+            // Mask the aircraft from the next motion estimate, so its own motion is not taken for shake.
+            lastTargetBox = if (visualMotion != null && p.hasTarget) {
+                val c = visualMotion.poseAt(frame.timestampNs).toImage(p.worldAt(frame.timestampNs), sourceCenter)
+                Box(c.x, c.y, maxOf(p.width, 24 * scale), maxOf(p.height, 24 * scale))
+            } else null
             lastAnalysisMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6
         } finally {
             freeBuffers.offer(frame.data)

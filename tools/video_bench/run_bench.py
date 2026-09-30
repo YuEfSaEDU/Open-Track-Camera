@@ -8,7 +8,7 @@ For each video:
   4. compute metrics and render a side-by-side video (wide view | output crop) plus a
      contact sheet of sampled frames.
 
-Requirements: pip install imageio-ffmpeg numpy pillow mediapipe ; ./gradlew :bench:installDist
+Requirements: pip install imageio-ffmpeg numpy opencv-python-headless mediapipe ; ./gradlew :bench:installDist
 Recorded videos have no gyro data, so this measures the no-gyro path (the hardest case for
 stabilization: hand shake is indistinguishable from target motion).
 """
@@ -23,7 +23,9 @@ import sys
 
 import imageio_ffmpeg
 import numpy as np
-from PIL import Image, ImageDraw
+import cv2
+
+from shake_metric import ShakeMeter, hf_rms
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -144,65 +146,137 @@ def metrics(rows, dets, fps, src_w):
 COLORS = {"TRACKING": (60, 230, 90), "COASTING": (255, 200, 40), "LOST": (255, 60, 60), "IDLE": (180, 180, 180)}
 
 
-def render(path, src_w, src_h, fps, rows, dets, max_s, out_mp4, sheet_png, sheet_every_s):
+def crop_affine(r, ow, oh):
+    """2x3 matrix mapping output pixels -> source pixels for the (possibly rotated) crop."""
+    cx, cy, cw, ch = (float(r[x]) for x in ("cx", "cy", "cw", "ch"))
+    rot = float(r.get("rot", 0.0) or 0.0)
+    sx, sy = cw / ow, ch / oh
+    c, s = math.cos(rot), math.sin(rot)
+    # p = center + R(rot) * diag(sx, sy) * (u - out_center)
+    a = np.array([[c * sx, -s * sy], [s * sx, c * sy]])
+    t = np.array([cx, cy]) - a @ np.array([ow / 2, oh / 2])
+    return np.hstack([a, t[:, None]])
+
+
+def target_in_output(r, ow, oh):
+    m = crop_affine(r, ow, oh)
+    a, t = m[:, :2], m[:, 2]
+    return np.linalg.solve(a, np.array([float(r["tx"]), float(r["ty"])]) - t)
+
+
+def render(path, src_w, src_h, fps, rows, dets, max_s, out_mp4, sheet_png, sheet_every_s, write_video=True):
+    """Renders wide | output video + contact sheet and measures shake of input and output."""
     pw = 960
     ph = round(pw * src_h / src_w / 2) * 2
     ow, oh = 960, 540
+    mw, mh = 640, 360  # measurement resolution of the output
     by_frame = {}
     for d in dets:
         by_frame.setdefault(int(d["frame"]), []).append(d)
-    enc = subprocess.Popen(
-        [FFMPEG, "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{pw + ow}x{max(ph, oh)}", "-r", str(fps), "-i", "-",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p", out_mp4],
-        stdin=subprocess.PIPE,
-    )
+    enc = None
+    if write_video:
+        enc = subprocess.Popen(
+            [FFMPEG, "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{pw + ow}x{max(ph, oh)}", "-r", str(fps), "-i", "-",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p", out_mp4],
+            stdin=subprocess.PIPE,
+        )
     k = pw / src_w
+    in_w = 640
+    in_h = round(in_w * src_h / src_w)
+    kin = in_w / src_w
+    out_w_ref = 1920.0
+    meter_in = ShakeMeter(fps, px_scale=out_w_ref / in_w)
+    meter_out = ShakeMeter(fps, px_scale=out_w_ref / mw)
+    tgt_out = []
     sheet = []
     every = max(1, round(sheet_every_s * fps))
-    last_dets = []
-    last_det_frame = 0
+    last_dets, last_det_frame = [], 0
     for i, rgb in enumerate(frames(path, src_w, src_h, "rgb24", max_s)):
         if i >= len(rows):
             break
         r = rows[i]
-        img = Image.fromarray(rgb)
-        cx, cy, cw, ch = (float(r[x]) for x in ("cx", "cy", "cw", "ch"))
-        crop = img.crop((round(cx - cw / 2), round(cy - ch / 2), round(cx + cw / 2), round(cy + ch / 2))).resize((ow, oh), Image.BILINEAR)
-        wide = img.resize((pw, ph), Image.BILINEAR)
-        dr = ImageDraw.Draw(wide)
-        dr.rectangle([(cx - cw / 2) * k, (cy - ch / 2) * k, (cx + cw / 2) * k, (cy + ch / 2) * k], outline=(255, 255, 255), width=2)
+        has_t = r["state"] in ("TRACKING", "COASTING")
+        tw, th = float(r["tw"]), float(r["th"])
+        # --- measurement ---
+        gin = cv2.cvtColor(cv2.resize(rgb, (in_w, in_h), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+        excl_in = None
+        if has_t:
+            tx, ty = float(r["tx"]) * kin, float(r["ty"]) * kin
+            hx, hy = max(tw * kin, 12), max(th * kin, 12)
+            excl_in = (tx - hx, ty - hy, tx + hx, ty + hy)
+        meter_in.add(gin, excl_in)
+        m_meas = crop_affine(r, mw, mh)
+        gout = cv2.cvtColor(cv2.warpAffine(rgb, m_meas, (mw, mh), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE), cv2.COLOR_RGB2GRAY)
+        excl_out = None
+        if has_t:
+            u = target_in_output(r, mw, mh)
+            ks = mw / float(r["cw"])
+            hx, hy = max(tw * ks, 16), max(th * ks, 16)
+            excl_out = (u[0] - hx, u[1] - hy, u[0] + hx, u[1] + hy)
+            tgt_out.append(target_in_output(r, out_w_ref, out_w_ref * 9 / 16))
+        elif tgt_out:
+            tgt_out.append(None)
+        meter_out.add(gout, excl_out)
+        # --- visualization ---
+        if not (write_video or i % every == 0):
+            continue
+        crop = cv2.warpAffine(rgb, crop_affine(r, ow, oh), (ow, oh), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_CONSTANT)
+        wide = cv2.resize(rgb, (pw, ph), interpolation=cv2.INTER_AREA)
+        corners = crop_affine(r, 1, 1) @ np.array([[0, 1, 1, 0], [0, 0, 1, 1], [1, 1, 1, 1]], dtype=float)
+        cv2.polylines(wide, [np.round(corners.T * k).astype(np.int32)], True, (255, 255, 255), 2)
         if i in by_frame:
             last_dets, last_det_frame = by_frame[i], i
         if last_dets and i - last_det_frame > fps * 0.3:
             last_dets = []  # detections are ~10 Hz; don't draw stale boxes
         for d in last_dets:
-            dr.rectangle([float(d["x0"]) * k, float(d["y0"]) * k, float(d["x1"]) * k, float(d["y1"]) * k], outline=(80, 200, 255), width=1)
+            cv2.rectangle(wide, (int(float(d["x0"]) * k), int(float(d["y0"]) * k)), (int(float(d["x1"]) * k), int(float(d["y1"]) * k)), (80, 200, 255), 1)
         col = COLORS[r["state"]]
-        if r["state"] in ("TRACKING", "COASTING"):
+        if has_t:
             tx, ty = float(r["tx"]) * k, float(r["ty"]) * k
-            hw = max(float(r["tw"]) * k / 2, 8)
-            hh = max(float(r["th"]) * k / 2, 8)
-            dr.rectangle([tx - hw, ty - hh, tx + hw, ty + hh], outline=col, width=2)
-        dr.text((6, 6), f"{i / fps:5.1f}s {r['state']} zoom {float(r['zoom']):.2f}x", fill=col)
-        cd = ImageDraw.Draw(crop)
-        cd.line([ow / 2 - 12, oh / 2, ow / 2 + 12, oh / 2], fill=(255, 255, 255))
-        cd.line([ow / 2, oh / 2 - 12, ow / 2, oh / 2 + 12], fill=(255, 255, 255))
-        canvas = Image.new("RGB", (pw + ow, max(ph, oh)))
-        canvas.paste(wide, (0, 0))
-        canvas.paste(crop, (pw, 0))
-        enc.stdin.write(canvas.tobytes())
+            hw, hh = max(tw * k / 2, 8), max(th * k / 2, 8)
+            cv2.rectangle(wide, (int(tx - hw), int(ty - hh)), (int(tx + hw), int(ty + hh)), col, 2)
+        cv2.putText(wide, f"{i / fps:5.1f}s {r['state']} zoom {float(r['zoom']):.2f}x", (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+        cv2.line(crop, (ow // 2 - 12, oh // 2), (ow // 2 + 12, oh // 2), (255, 255, 255), 1)
+        cv2.line(crop, (ow // 2, oh // 2 - 12), (ow // 2, oh // 2 + 12), (255, 255, 255), 1)
+        canvas = np.zeros((max(ph, oh), pw + ow, 3), np.uint8)
+        canvas[:ph, :pw] = wide
+        canvas[:oh, pw:] = crop
+        if enc:
+            enc.stdin.write(canvas.tobytes())
         if i % every == 0:
-            sheet.append(canvas.resize(((pw + ow) // 2, max(ph, oh) // 2)))
-    enc.stdin.close()
-    enc.wait()
-    if sheet:
+            sheet.append(cv2.resize(canvas, ((pw + ow) // 2, max(ph, oh) // 2), interpolation=cv2.INTER_AREA))
+    if enc:
+        enc.stdin.close()
+        enc.wait()
+    if sheet and sheet_png:
         cols = 2
         rws = math.ceil(len(sheet) / cols)
-        tw, th = sheet[0].size
-        s = Image.new("RGB", (tw * cols, th * rws))
+        th_, tw_ = sheet[0].shape[:2]
+        s = np.zeros((th_ * rws, tw_ * cols, 3), np.uint8)
         for j, t in enumerate(sheet):
-            s.paste(t, ((j % cols) * tw, (j // cols) * th))
-        s.save(sheet_png)
+            s[(j // cols) * th_:(j // cols + 1) * th_, (j % cols) * tw_:(j % cols + 1) * tw_] = t
+        cv2.imwrite(sheet_png, cv2.cvtColor(s, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    tin = meter_in.result()
+    tout = meter_out.result()
+    # Target jitter in the output (px at 1920 wide), over the longest runs with a target.
+    runs, cur = [], []
+    for u in tgt_out:
+        if u is None:
+            if len(cur) > fps:
+                runs.append(cur)
+            cur = []
+        else:
+            cur.append(u)
+    if len(cur) > fps:
+        runs.append(cur)
+    jit = [hf_rms(run, fps) for run in runs]
+    n = sum(len(run) for run in runs)
+    target_jitter = None if n == 0 else round(math.sqrt(sum(j * j * len(run) for j, run in zip(jit, runs) if j is not None) / n), 2)
+    return {
+        "input_shake_px": tin["shake_px"], "input_shake_deg": tin["shake_deg"], "input_coverage": tin["coverage"],
+        "output_shake_px": tout["shake_px"], "output_shake_deg": tout["shake_deg"], "output_jerk_px": tout["jerk_px"], "output_coverage": tout["coverage"],
+        "target_jitter_px": target_jitter,
+    }
 
 
 def main():
@@ -217,6 +291,9 @@ def main():
     ap.add_argument("--mode", choices=["hybrid", "neural", "sky"], default="hybrid")
     ap.add_argument("--no-render", action="store_true")
     ap.add_argument("--reuse", action="store_true", help="reuse cached neural detections in --out")
+    ap.add_argument("--measure", action="store_true", help="measure shake even with --no-render")
+    ap.add_argument("--tag", default="", help="suffix for output files (compare variants)")
+    ap.add_argument("--bench-args", default="", help="extra arguments passed to the Kotlin bench")
     ap.add_argument("--sheet-every", type=float, default=3.0)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -235,7 +312,7 @@ def main():
             n_det = len(load_csv(dets_csv))
         else:
             n_det = neural_detections(v, AW, ah, fps, sx, a.max_seconds, dets_csv)
-        track_csv = os.path.join(a.out, name + ".track.csv")
+        track_csv = os.path.join(a.out, name + a.tag + ".track.csv")
         out_w = 1920 if w >= 2560 else min(1280, w)
         out_h = round(out_w * 9 / 16)
         cmd = [BENCH, "--luma", luma, "--width", str(AW), "--height", str(ah), "--source-width", str(w), "--source-height", str(h),
@@ -245,6 +322,7 @@ def main():
             cmd += ["--zoom", str(a.zoom)]
         if a.auto_zoom:
             cmd += ["--auto-zoom", "--zoom-min", str(a.zoom_min), "--zoom-max", str(a.zoom_max)]
+        cmd += a.bench_args.split()
         subprocess.run(cmd, check=True)
         os.remove(luma)
         rows = load_csv(track_csv)
@@ -252,10 +330,11 @@ def main():
         m = metrics(rows, dets, fps, w)
         m.update({"video": os.path.basename(v), "resolution": f"{w}x{h}@{fps:g}", "neural_detections": n_det})
         summary[name] = m
+        if not a.no_render or a.measure:
+            m.update(render(v, w, h, fps, rows, dets, a.max_seconds, os.path.join(a.out, name + a.tag + ".mp4"),
+                            os.path.join(a.out, name + a.tag + ".sheet.jpg"), a.sheet_every, write_video=not a.no_render))
         print(json.dumps(m), flush=True)
-        if not a.no_render:
-            render(v, w, h, fps, rows, dets, a.max_seconds, os.path.join(a.out, name + ".mp4"), os.path.join(a.out, name + ".sheet.jpg"), a.sheet_every)
-    with open(os.path.join(a.out, "summary.json"), "w") as f:
+    with open(os.path.join(a.out, f"summary{a.tag}.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
 

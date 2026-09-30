@@ -94,6 +94,8 @@
             <Button android:id="@+id/viewMode" style="@style/ControlToggle" />
             <Button android:id="@+id/autoLock" style="@style/ControlToggle" />
             <Button android:id="@+id/autoZoom" style="@style/ControlToggle" />
+            <Button android:id="@+id/stabilizer" style="@style/ControlToggle" />
+            <Button android:id="@+id/horizon" style="@style/ControlToggle" />
             <Button android:id="@+id/releaseTarget" style="@style/ControlToggle" android:text="@string/release_target" />
             <Button android:id="@+id/detector" style="@style/ControlToggle" />
             <Button android:id="@+id/focus" style="@style/ControlToggle" />

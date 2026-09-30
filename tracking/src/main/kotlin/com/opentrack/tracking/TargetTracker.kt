@@ -17,7 +17,7 @@ enum class TrackState {
 
 /**
  * Immutable tracker output, published after every analysed frame. Positions are
- * "world" coordinates (image position minus [CameraMotion] offset), in source pixels.
+ * "world" coordinates (image position with the [CameraPose] removed), in source pixels.
  * Safe to read from any thread; [worldAt] extrapolates to the timestamp being rendered.
  */
 data class TrackPrediction(
@@ -142,6 +142,7 @@ class TargetTracker(
     private var pendingTap: Vec2? = null
     private var pendingClear = false
     private var frameWidthPx = 3840.0
+    private var frameCenter = Vec2(1920.0, 1080.0)
     private var userSelected = false
     private var neuralDisagreements = 0
     private var lastNeuralConfirmNs = Long.MIN_VALUE / 2
@@ -158,6 +159,7 @@ class TargetTracker(
     fun process(frame: LumaFrame, detections: List<Detection>): TrackPrediction {
         val t = frame.timestampNs
         frameWidthPx = frame.width * frame.scale
+        frameCenter = Vec2(frameWidthPx / 2, frame.height * frame.scale / 2)
         updateLatestDetections(detections, t)
 
         fx.accelNoise = config.accelNoise
@@ -204,9 +206,8 @@ class TargetTracker(
     private fun step(frame: LumaFrame, detections: List<Detection>) {
         val t = frame.timestampNs
         predictTo(t)
-        val offset = motion.offsetAt(t)
         val s = frame.scale
-        val predictedImage = Vec2(fx.position, fy.position) + offset
+        val predictedImage = toImage(Vec2(fx.position, fy.position), t)
 
         val sigma = sqrt(max(fx.positionVariance, fy.positionVariance)) / s
         val radius = (3 * sigma + 2).roundToInt().coerceIn(config.minSearchRadius, config.maxSearchRadius)
@@ -216,7 +217,7 @@ class TargetTracker(
         val measured = match != null && match.score >= config.minMatchScore && match.anchorScore >= config.minAnchorScore &&
             match.contrastRatio >= config.minContrastRatio && match.contrast >= config.minContrast
         if (measured) {
-            val z = match!!.center * s - offset
+            val z = toWorld(match!!.center * s, t)
             val r = (config.matchStdAnalysisPx * s).let { it * it } / (match.score * match.score)
             fx.update(z.x, r)
             fy.update(z.y, r)
@@ -248,7 +249,7 @@ class TargetTracker(
             val reseed = !measured ||
                 (!consistent && det.source == DetectionSource.NEURAL && match!!.score < config.reseedScore)
             if (reseed) {
-                val z = box.center - offset
+                val z = toWorld(box.center, t)
                 val r = (config.detectionStdFraction * max(box.width, box.height)).let { it * it }
                 fx.update(z.x, r)
                 fy.update(z.y, r)
@@ -298,7 +299,7 @@ class TargetTracker(
         val candidates = detections.filter { it.source == DetectionSource.NEURAL || config.acquireFromSkyBlobs }
         val chosen = if (gate != null) {
             val predicted = Vec2(fx.position, fy.position)
-            candidates.map { it to (projectDetection(it, t, null).center - motion.offsetAt(t) - predicted).length() }
+            candidates.map { it to (toWorld(projectDetection(it, t, null).center, t) - predicted).length() }
                 .filter { it.second < gate }
                 .minByOrNull { it.second }?.first
         } else {
@@ -310,7 +311,7 @@ class TargetTracker(
 
     private fun startTrack(frame: LumaFrame, box: Box) {
         val t = frame.timestampNs
-        val w = box.center - motion.offsetAt(t)
+        val w = toWorld(box.center, t)
         val posVar = (0.1 * max(box.width, box.height)).let { it * it } + 4.0
         val velVar = 2000.0 * 2000.0
         fx.reset(w.x, posVar, 0.0, velVar)
@@ -332,21 +333,20 @@ class TargetTracker(
      * if known, the target velocity.
      */
     private fun projectDetection(det: Detection, t: Long, velocity: Vec2?): Box {
-        val worldAtDet = det.box.center - motion.offsetAt(det.timestampNs)
+        val worldAtDet = toWorld(det.box.center, det.timestampNs)
         val dt = ((t - det.timestampNs) * 1e-9).coerceIn(0.0, 0.5)
         val worldNow = worldAtDet + (velocity ?: Vec2.ZERO) * dt
-        return det.box.movedTo(worldNow + motion.offsetAt(t))
+        return det.box.movedTo(toImage(worldNow, t))
     }
 
     private fun associate(detections: List<Detection>, t: Long): Detection? {
         if (detections.isEmpty()) return null
         val predicted = Vec2(fx.position, fy.position)
         val vel = Vec2(fx.velocity, fy.velocity)
-        val offset = motion.offsetAt(t)
         val gate = gateFor(t)
         return detections
             .filter { sizeCompatible(it) }
-            .map { it to (projectDetection(it, t, vel).center - offset - predicted).length() }
+            .map { it to (toWorld(projectDetection(it, t, vel).center, t) - predicted).length() }
             .filter { it.second < gate }
             .minByOrNull { it.second - it.first.score * 10 }?.first
     }
@@ -362,6 +362,10 @@ class TargetTracker(
         val tol = if (d.source == DetectionSource.NEURAL) config.neuralSizeTolerance else config.skySizeTolerance
         return ratio in (1 / tol)..tol
     }
+
+    private fun toWorld(image: Vec2, t: Long) = motion.poseAt(t).toWorld(image, frameCenter)
+
+    private fun toImage(world: Vec2, t: Long) = motion.poseAt(t).toImage(world, frameCenter)
 
     private fun gateFor(t: Long): Double {
         val sigma = sqrt(max(fx.positionVariance, fy.positionVariance))

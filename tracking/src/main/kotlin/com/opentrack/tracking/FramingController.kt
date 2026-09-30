@@ -1,15 +1,56 @@
 package com.opentrack.tracking
 
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.sin
 import kotlin.math.max
 import kotlin.math.min
 
-/** Crop window inside the source frame, in source pixels. */
-data class CropWindow(val cx: Double, val cy: Double, val width: Double, val height: Double) {
+/**
+ * Crop window inside the source frame, in source pixels, rotated by [rotation] radians
+ * (clockwise on screen) about its center. Output pixel u (relative to the output center,
+ * scaled to source px) comes from image position center + R(rotation) u.
+ */
+data class CropWindow(val cx: Double, val cy: Double, val width: Double, val height: Double, val rotation: Double = 0.0) {
     val left: Double get() = cx - width / 2
     val top: Double get() = cy - height / 2
+    val center: Vec2 get() = Vec2(cx, cy)
+
+    /** Maps an image point into crop-local coordinates (source px, origin at the crop center). */
+    fun toLocal(image: Vec2): Vec2 = (image - center).rotated(-rotation)
+
+    /** Half extents of the axis aligned bounding box of the rotated crop. */
+    fun halfExtents(): Vec2 = rotatedHalfExtents(width, height, rotation)
+
+    companion object {
+        fun rotatedHalfExtents(w: Double, h: Double, rotation: Double): Vec2 {
+            val c = abs(cos(rotation))
+            val s = abs(sin(rotation))
+            return Vec2((c * w + s * h) / 2, (s * w + c * h) / 2)
+        }
+
+        /** Largest |rotation| ≤ [limit] for which a w×h crop rotated by it fits in availW×availH. */
+        fun maxFittingRotation(w: Double, h: Double, availW: Double, availH: Double, limit: Double): Double {
+            fun fits(r: Double): Boolean {
+                val e = rotatedHalfExtents(w, h, r)
+                return e.x <= availW / 2 + 1e-9 && e.y <= availH / 2 + 1e-9
+            }
+            if (fits(limit)) return limit
+            if (!fits(0.0)) return 0.0
+            var lo = 0.0
+            var hi = limit
+            repeat(20) {
+                val mid = (lo + hi) / 2
+                if (fits(mid)) lo = mid else hi = mid
+            }
+            return lo
+        }
+    }
 }
+
+/** coerceIn that tolerates an empty range (returns its midpoint). */
+internal fun Double.clampSafe(lo: Double, hi: Double): Double = if (lo <= hi) coerceIn(lo, hi) else (lo + hi) / 2
 
 data class FramingConfig(
     /** Natural frequency (rad/s) of the camera-path spring while following a target. */
@@ -22,6 +63,10 @@ data class FramingConfig(
     val leadTimeS: Double = 0.12,
     /** Lead is capped to this fraction of the half crop size. */
     val maxLeadFraction: Double = 0.25,
+    /** Time constant of the virtual camera's roll (horizon) path; 0 disables roll stabilization. */
+    val rollSmoothS: Double = 0.8,
+    /** Largest crop rotation used to cancel roll, radians. */
+    val maxRoll: Double = 0.09,
 )
 
 /**
@@ -64,6 +109,7 @@ class FramingController(
     private var vx = 0.0
     private var vy = 0.0
     private var lastNs = 0L
+    private var virtualRoll = 0.0
 
     fun reset() {
         initialized = false
@@ -90,7 +136,8 @@ class FramingController(
             zoom = autoZoom.update(dtZoom, zoom, track, sourceWidth, outputAspect, coastingS, lastTargetOffset)
         }
         val (cw, ch) = cropSize()
-        val offset = motion.offsetAt(timestampNs)
+        val pose = motion.poseAt(timestampNs)
+        val center = Vec2(sourceWidth / 2.0, sourceHeight / 2.0)
         val following = track.hasTarget
 
         val goal: Vec2 = if (following) {
@@ -101,11 +148,12 @@ class FramingController(
             w + lead
         } else {
             // World position of the current frame center: following it slowly == EIS.
-            Vec2(sourceWidth / 2.0, sourceHeight / 2.0) - offset
+            pose.toWorld(center, center)
         }
 
         if (!initialized) {
             sx = goal.x; sy = goal.y; vx = 0.0; vy = 0.0
+            virtualRoll = pose.roll
             lastNs = timestampNs
             initialized = true
         }
@@ -116,6 +164,16 @@ class FramingController(
         // target velocity forward so a steadily moving aircraft sits where the lead puts it.
         stepSpring(if (following) goal + track.velocity * (2 / omega) else goal, omega, dt)
 
+        // Horizon: the virtual camera's roll follows the real roll slowly (removes roll shake).
+        virtualRoll = if (config.rollSmoothS > 0) {
+            val a = 1 - exp(-dt / config.rollSmoothS)
+            (virtualRoll + (pose.roll - virtualRoll) * a).coerceIn(pose.roll - config.maxRoll, pose.roll + config.maxRoll)
+        } else pose.roll
+        // Only rotate as far as the rotated crop still fits in the sensor (none at 1x zoom).
+        val rotLimit = CropWindow.maxFittingRotation(cw, ch, sourceWidth.toDouble(), sourceHeight.toDouble(), config.maxRoll)
+        val rotation = (pose.roll - virtualRoll).coerceIn(-rotLimit, rotLimit)
+        virtualRoll = pose.roll - rotation
+
         if (following) {
             // Never let the target leave the central part of the crop.
             val target = track.worldAt(timestampNs)
@@ -125,18 +183,26 @@ class FramingController(
             sy = sy.coerceIn(target.y - limY, target.y + limY)
         }
 
-        // Back to image space and keep the crop inside the sensor frame.
-        val cx = (sx + offset.x).coerceIn(cw / 2, sourceWidth - cw / 2)
-        val cy = (sy + offset.y).coerceIn(ch / 2, sourceHeight - ch / 2)
-        // Anti wind-up: when clamped, move the virtual camera to where the crop really is.
-        if (cx != sx + offset.x) { sx = cx - offset.x; vx = 0.0 }
-        if (cy != sy + offset.y) { sy = cy - offset.y; vy = 0.0 }
+        // Back to image space and keep the (rotated) crop inside the sensor frame.
+        val ext = CropWindow.rotatedHalfExtents(cw, ch, rotation)
+        val wanted = pose.toImage(Vec2(sx, sy), center)
+        val cx = wanted.x.clampSafe(ext.x, sourceWidth - ext.x)
+        val cy = wanted.y.clampSafe(ext.y, sourceHeight - ext.y)
+        if (cx != wanted.x || cy != wanted.y) {
+            // Anti wind-up: when clamped, move the virtual camera to where the crop really is.
+            val w = pose.toWorld(Vec2(cx, cy), center)
+            if (cx != wanted.x) vx = 0.0
+            if (cy != wanted.y) vy = 0.0
+            sx = w.x
+            sy = w.y
+        }
+        val crop = CropWindow(cx, cy, cw, ch, rotation)
 
         lastTargetOffset = if (following) {
-            val t = track.worldAt(timestampNs) + offset
-            max(abs(t.x - cx) / (cw / 2), abs(t.y - cy) / (ch / 2))
+            val local = crop.toLocal(pose.toImage(track.worldAt(timestampNs), center))
+            max(abs(local.x) / (cw / 2), abs(local.y) / (ch / 2))
         } else 0.0
-        return CropWindow(cx, cy, cw, ch)
+        return crop
     }
 
     /** Exact step of a critically damped spring towards [goal]; stable for any dt. */

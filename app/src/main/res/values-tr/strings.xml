@@ -13,6 +13,12 @@
     <string name="detector_neural">Dedektör: sinir ağı</string>
     <string name="detector_sky">Dedektör: gökyüzü</string>
     <string name="crop_zoom">Kırpma %.2fx</string>
+    <string name="stab_responsive">Stabilizasyon: hızlı</string>
+    <string name="stab_balanced">Stabilizasyon: dengeli</string>
+    <string name="stab_cinematic">Stabilizasyon: sinematik</string>
+    <string name="horizon_on">Ufuk: sabit</string>
+    <string name="horizon_off">Ufuk: serbest</string>
+    <string name="stab_locked_while_recording">Stabilizasyon gecikmesini değiştirmek için kaydı durdurun</string>
     <string name="auto_zoom_on">Oto zoom: açık</string>
     <string name="auto_zoom_off">Oto zoom: kapalı</string>
     <string name="zoom_min">Min %s</string>

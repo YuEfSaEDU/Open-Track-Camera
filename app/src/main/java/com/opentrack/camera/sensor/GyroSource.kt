@@ -29,7 +29,7 @@ class GyroSource(private val sensors: SensorManager, private val model: GyroMoti
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        model.onGyroSample(event.timestamp, event.values[0].toDouble(), event.values[1].toDouble())
+        model.onGyroSample(event.timestamp, event.values[0].toDouble(), event.values[1].toDouble(), event.values[2].toDouble())
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit

@@ -18,7 +18,7 @@ class FramingControllerTest {
 
     @Test
     fun cancelsShakeWhileStabilizing() {
-        val shake = CameraMotion { t -> Vec2(40.0 * sin(t * 1e-9 * 30), 0.0) }
+        val shake = CameraMotion { t -> CameraPose(Vec2(40.0 * sin(t * 1e-9 * 30), 0.0), 0.0) }
         val f = FramingController(3840, 2160, 16.0 / 9, shake)
         // A static world point: in the image it moves with the shake; in the crop it must not.
         val worldPoint = Vec2(1900.0, 1080.0)
@@ -27,7 +27,7 @@ class FramingControllerTest {
         for (i in 0 until 120) {
             val t = i * 16_666_667L
             val crop = f.update(t, TrackPrediction.IDLE)
-            val inCrop = worldPoint.x + shake.offsetAt(t).x - crop.left
+            val inCrop = worldPoint.x + shake.poseAt(t).offset.x - crop.left
             if (first == null) first = inCrop
             maxJitter = maxOf(maxJitter, abs(inCrop - first))
         }
@@ -56,5 +56,25 @@ class FramingControllerTest {
         // Lead time puts the crop slightly ahead of the target, in the direction of motion.
         assertTrue(crop!!.cx > targetX)
         assertTrue(crop.cx - targetX < 100.0)
+    }
+
+    @Test
+    fun cancelsRollShakeByRotatingTheCrop() {
+        // Camera rolls back and forth by ±1°; a static world point off-center must stay still in the output.
+        val roll = CameraMotion { t -> CameraPose(Vec2.ZERO, Math.toRadians(1.0) * sin(t * 1e-9 * 25)) }
+        val f = FramingController(3840, 2160, 16.0 / 9, roll)
+        val center = Vec2(1920.0, 1080.0)
+        val world = Vec2(2300.0, 900.0)
+        var first: Vec2? = null
+        var maxJitter = 0.0
+        for (i in 0 until 180) {
+            val t = i * 16_666_667L
+            val crop = f.update(t, TrackPrediction.IDLE)
+            val local = crop.toLocal(roll.poseAt(t).toImage(world, center))
+            if (first == null) first = local
+            maxJitter = maxOf(maxJitter, (local - first).length())
+        }
+        // Uncompensated this point would move by ~2 * 440 px * sin(1°) ≈ 15 px.
+        assertTrue("jitter $maxJitter px", maxJitter < 2.0)
     }
 }

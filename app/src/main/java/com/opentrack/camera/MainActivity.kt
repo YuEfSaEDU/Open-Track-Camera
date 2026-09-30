@@ -37,6 +37,8 @@ import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackState
 import com.opentrack.tracking.TrackerConfig
 import com.opentrack.tracking.ZoomConfig
+import com.opentrack.tracking.StabilizerConfig
+import com.opentrack.tracking.VisualMotionEstimator
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
@@ -58,6 +60,15 @@ class MainActivity : AppCompatActivity() {
     private var settings = CameraSettings()
     private var cropZoom = 2.0
     private var zoomConfig = ZoomConfig(auto = true, minZoom = 1.0, maxZoom = 3.0)
+    private var stabPreset = StabPreset.BALANCED
+    private var horizonLock = true
+
+    /** Look-ahead (seconds of delay) and path smoothness presets. */
+    private enum class StabPreset(val lookaheadS: Double, val smoothness: Double, val label: Int) {
+        RESPONSIVE(0.2, 0.4, R.string.stab_responsive),
+        BALANCED(0.33, 0.6, R.string.stab_balanced),
+        CINEMATIC(0.5, 0.8, R.string.stab_cinematic),
+    }
     private var previewMode = PreviewMode.WIDE
     private var autoLock = true
     private var detectorMode = AnalysisEngine.Mode.HYBRID
@@ -117,6 +128,16 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.shutter).setOnClickListener {
             updateSettings(settings.copy(shutterPriority = !settings.shutterPriority))
         }
+        findViewById<Button>(R.id.stabilizer).setOnClickListener {
+            val all = StabPreset.entries
+            val nextPreset = all[(stabPreset.ordinal + 1) % all.size]
+            if (applyStabilizer(nextPreset, horizonLock)) stabPreset = nextPreset
+            refreshButtons()
+        }
+        findViewById<Button>(R.id.horizon).setOnClickListener {
+            if (applyStabilizer(stabPreset, !horizonLock)) horizonLock = !horizonLock
+            refreshButtons()
+        }
         findViewById<Button>(R.id.autoZoom).setOnClickListener {
             updateZoomConfig(zoomConfig.copy(auto = !zoomConfig.auto))
         }
@@ -164,7 +185,9 @@ class MainActivity : AppCompatActivity() {
         }
         val sensors = getSystemService(SensorManager::class.java)
         val g = GyroSource(sensors, model)
-        val motion: CameraMotion = if (g.available) model else CameraMotion.NONE
+        // Gyro when available (exact, no latency); otherwise estimate camera motion from the image.
+        val visual = if (g.available) null else VisualMotionEstimator()
+        val motion: CameraMotion = if (g.available) model else visual!!
         if (g.available) g.start()
         gyro = g
         gyroModel = model
@@ -177,14 +200,14 @@ class MainActivity : AppCompatActivity() {
 
         val analysisW = 640
         val analysisH = ((analysisW.toDouble() * srcH / srcW) / 2).roundToInt() * 2
-        val engine = AnalysisEngine(tracker, detector, analysisW, analysisH, srcW.toDouble() / analysisW).also { it.mode = detectorMode }
+        val engine = AnalysisEngine(tracker, detector, visual, analysisW, analysisH, srcW.toDouble() / analysisW).also { it.mode = detectorMode }
         analysis = engine
 
         val framing = FramingController(srcW, srcH, outputWidth.toDouble() / outputHeight, motion).also {
             it.zoom = cropZoom
             it.zoomConfig = zoomConfig
         }
-        val rp = RenderPipeline(p, motion, tracker, engine, framing, rotationQuarter, object : RenderPipeline.Listener {
+        val rp = RenderPipeline(p, motion, tracker, engine, framing, stabilizerConfig(p, stabPreset, horizonLock), outputWidth, outputHeight, rotationQuarter, object : RenderPipeline.Listener {
             override fun onCameraSurface(surface: Surface) {
                 runOnUiThread { openCamera(p, surface, model, clockOffsetNs) }
             }
@@ -309,6 +332,21 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun stabilizerConfig(p: CameraProfile, preset: StabPreset, horizon: Boolean) = StabilizerConfig(
+        delayFrames = (preset.lookaheadS * p.fps).roundToInt(),
+        smoothness = preset.smoothness,
+        rollStabilization = horizon,
+    )
+
+    /** Returns false (and tells the user) when the change needs a new look-ahead buffer while recording. */
+    private fun applyStabilizer(preset: StabPreset, horizon: Boolean): Boolean {
+        val p = profile ?: return true
+        val rp = pipeline ?: return true
+        val ok = rp.setStabilizer(stabilizerConfig(p, preset, horizon))
+        if (!ok) Toast.makeText(this, R.string.stab_locked_while_recording, Toast.LENGTH_SHORT).show()
+        return ok
+    }
+
     private fun updateZoomConfig(c: ZoomConfig) {
         val wasAuto = zoomConfig.auto
         zoomConfig = c
@@ -402,6 +440,8 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.focus).setText(if (settings.focusInfinity) R.string.focus_inf_on else R.string.focus_inf_off)
         findViewById<Button>(R.id.shutter).setText(if (settings.shutterPriority) R.string.shutter_fast_on else R.string.shutter_fast_off)
         findViewById<Button>(R.id.autoZoom).setText(if (zoomConfig.auto) R.string.auto_zoom_on else R.string.auto_zoom_off)
+        findViewById<Button>(R.id.stabilizer).setText(stabPreset.label)
+        findViewById<Button>(R.id.horizon).setText(if (horizonLock) R.string.horizon_on else R.string.horizon_off)
     }
 
     private fun hasPermission(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED

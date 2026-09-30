@@ -11,22 +11,28 @@ import com.opentrack.camera.camera.CameraProfile
 import com.opentrack.camera.gl.EglCore
 import com.opentrack.camera.gl.FrameRenderer
 import com.opentrack.camera.gl.ReadbackTarget
+import com.opentrack.camera.gl.YuvRing
 import com.opentrack.tracking.Box
 import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.CropWindow
 import com.opentrack.tracking.FramingController
+import com.opentrack.tracking.LookaheadFramer
+import com.opentrack.tracking.StabilizerConfig
 import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackPrediction
+import com.opentrack.tracking.Vec2
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
  * The GL render thread. For every camera frame:
  *  1. read back a small luma image (and occasionally RGBA) for analysis,
- *  2. ask the [FramingController] for the stabilized crop window at this frame's timestamp,
- *  3. render the crop into the encoder surface (1080p) with the camera timestamp,
- *  4. render the preview (wide view or output view),
- *  5. publish an overlay snapshot for the UI.
+ *  2. ask the causal [FramingController] for zoom and the expected crop (the live view),
+ *  3. store the region around it ("capture window") in the [YuvRing],
+ *  4. let the [LookaheadFramer] produce the stabilized crop of the frame from
+ *     [StabilizerConfig.delayFrames] frames ago, now that its future is known, and render it
+ *     from the ring into the encoder (with that frame's camera timestamp) and output preview,
+ *  5. render the live preview and publish an overlay snapshot for the UI.
  */
 class RenderPipeline(
     private val profile: CameraProfile,
@@ -34,6 +40,9 @@ class RenderPipeline(
     private val tracker: TargetTracker,
     private val analysis: AnalysisEngine,
     val framing: FramingController,
+    stabilizer: StabilizerConfig,
+    private val outputWidth: Int,
+    private val outputHeight: Int,
     private val displayRotationQuarterTurns: Int,
     private val listener: Listener,
 ) : SurfaceTexture.OnFrameAvailableListener {
@@ -53,6 +62,7 @@ class RenderPipeline(
     private lateinit var renderer: FrameRenderer
     private lateinit var lumaTarget: ReadbackTarget
     private lateinit var rgbTarget: ReadbackTarget
+    private var ring: YuvRing? = null
     private var texture = 0
     private var surfaceTexture: SurfaceTexture? = null
     private var cameraSurface: Surface? = null
@@ -60,16 +70,19 @@ class RenderPipeline(
     private var encoder: EGLSurface? = null
     private var encoderWidth = 0
     private var encoderHeight = 0
+    private var recordFromNs = Long.MAX_VALUE
     private val texMatrix = FloatArray(16)
     private var released = false
+
+    private val srcW = profile.sourceSize.width
+    private val srcH = profile.sourceSize.height
+    private var framer = LookaheadFramer(srcW, srcH, motion, stabilizer)
+    private var lastOutput: LookaheadFramer.Output? = null
 
     private var fpsWindowStart = 0L
     private var fpsFrames = 0
     private var fps = 0.0
     private var frameCounter = 0L
-
-    private val srcW = profile.sourceSize.width
-    private val srcH = profile.sourceSize.height
 
     fun start() = handler.post {
         egl = EglCore()
@@ -78,6 +91,7 @@ class RenderPipeline(
         renderer = FrameRenderer().also { it.displayRotationQuarterTurns = displayRotationQuarterTurns }
         lumaTarget = ReadbackTarget(analysis.width / 4, analysis.height)
         rgbTarget = ReadbackTarget(analysis.width, analysis.height)
+        createRing()
         texture = renderer.createOesTexture()
         val st = SurfaceTexture(texture)
         st.setDefaultBufferSize(srcW, srcH)
@@ -86,6 +100,28 @@ class RenderPipeline(
         val s = Surface(st)
         cameraSurface = s
         listener.onCameraSurface(s)
+    }
+
+    /**
+     * Applies new stabilizer settings. A different look-ahead needs a different ring, so it is
+     * only accepted while not recording; returns false when it was rejected.
+     */
+    fun setStabilizer(config: StabilizerConfig): Boolean {
+        var ok = true
+        runSync {
+            if (config.delayFrames != framer.config.delayFrames) {
+                if (encoder != null) {
+                    ok = false
+                    return@runSync
+                }
+                framer = LookaheadFramer(srcW, srcH, motion, config)
+                lastOutput = null
+                createRing()
+            } else {
+                framer.config = config
+            }
+        }
+        return ok
     }
 
     fun setPreviewSurface(surface: Surface?) = runSync {
@@ -97,12 +133,23 @@ class RenderPipeline(
         encoder = egl.createWindowSurface(surface)
         encoderWidth = width
         encoderHeight = height
+        // Only frames captured from now on go into the file (older ones are still in the ring).
+        recordFromNs = Long.MAX_VALUE
+        pendingRecordStart = true
     }
 
+    /** Stops recording: the frames still waiting for look-ahead are finished and written first. */
     fun detachEncoder() = runSync {
-        encoder?.let { egl.makeCurrent(pbuffer); egl.releaseSurface(it) }
+        encoder?.let { enc ->
+            for (o in framer.flush()) writeEncoder(enc, o)
+            egl.makeCurrent(pbuffer)
+            egl.releaseSurface(enc)
+        }
         encoder = null
+        recordFromNs = Long.MAX_VALUE
     }
+
+    private var pendingRecordStart = false
 
     fun release() {
         runSync {
@@ -115,6 +162,7 @@ class RenderPipeline(
             egl.makeCurrent(pbuffer)
             lumaTarget.release()
             rgbTarget.release()
+            ring?.release()
             renderer.release()
             GLES20.glDeleteTextures(1, intArrayOf(texture), 0)
             cameraSurface?.release()
@@ -134,11 +182,26 @@ class RenderPipeline(
         }
     }
 
+    private fun createRing() {
+        egl.makeCurrent(pbuffer)
+        ring?.release()
+        // The capture window is CAPTURE_MARGIN times the crop, stored at output resolution.
+        val w = even(outputWidth * CAPTURE_MARGIN)
+        val h = even(outputHeight * CAPTURE_MARGIN)
+        ring = YuvRing(w, h, framer.config.delayFrames + 3).also {
+            Log.i(TAG, "look-ahead ${framer.config.delayFrames} frames, ring ${it.bytes / (1 shl 20)} MB")
+        }
+    }
+
     private fun drawFrame(st: SurfaceTexture) {
         egl.makeCurrent(pbuffer)
         st.updateTexImage()
         st.getTransformMatrix(texMatrix)
         val ts = st.timestamp
+        if (pendingRecordStart) {
+            recordFromNs = ts
+            pendingRecordStart = false
+        }
 
         // 1. Analysis readbacks.
         lumaTarget.bind()
@@ -150,39 +213,41 @@ class RenderPipeline(
             analysis.submitNeuralFrame(rgbTarget.read(), ts)
         }
 
-        // 2. Stabilized crop for this exact frame time.
+        // 2-3. Causal (live) crop sets zoom and where to capture; keep that region in the ring.
         val prediction = tracker.prediction
-        val crop = framing.update(ts, prediction)
-        val l = (crop.left / srcW).toFloat()
-        val t = (crop.top / srcH).toFloat()
-        val w = (crop.width / srcW).toFloat()
-        val h = (crop.height / srcH).toFloat()
+        val live = framing.update(ts, prediction)
+        val capture = Box(live.cx, live.cy, live.width * CAPTURE_MARGIN, live.height * CAPTURE_MARGIN)
+        ring?.store(renderer, texture, texMatrix, srcW, srcH, capture, ts)
 
-        // 3. Encoder.
-        encoder?.let { enc ->
-            egl.makeCurrent(enc)
-            GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
-            renderer.drawRegion(texture, texMatrix, l, t, w, h)
-            egl.setPresentationTime(enc, ts)
-            egl.swap(enc)
+        // 4. Stabilized output for the delayed frame.
+        framer.addFrame(ts, live.width, live.height, capture)
+        framer.updateTrack(prediction)
+        framer.emit()?.let { out ->
+            lastOutput = out
+            encoder?.let { writeEncoder(it, out) }
         }
 
-        // 4. Preview, letterboxed to the content aspect.
+        // 5. Preview, letterboxed to the content aspect.
         preview?.let { pv ->
             egl.makeCurrent(pv)
             val (vw, vh) = egl.surfaceSize(pv)
             GLES20.glViewport(0, 0, vw, vh)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            val aspect = if (previewMode == PreviewMode.WIDE) srcW.toDouble() / srcH else crop.width / crop.height
-            val (x, y, cw, ch) = fit(vw, vh, aspect)
-            GLES20.glViewport(x, y, cw, ch)
-            if (previewMode == PreviewMode.WIDE) renderer.drawRegion(texture, texMatrix, 0f, 0f, 1f, 1f)
-            else renderer.drawRegion(texture, texMatrix, l, t, w, h)
+            val out = lastOutput
+            if (previewMode == PreviewMode.OUTPUT && out != null) {
+                val (x, y, cw, ch) = fit(vw, vh, out.crop.width / out.crop.height)
+                GLES20.glViewport(x, y, cw, ch)
+                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop) } }
+            } else {
+                val (x, y, cw, ch) = fit(vw, vh, srcW.toDouble() / srcH)
+                GLES20.glViewport(x, y, cw, ch)
+                renderer.drawRegion(texture, texMatrix, 0f, 0f, 1f, 1f)
+            }
             egl.swap(pv)
         }
 
-        // 5. Stats + overlay (every other frame is plenty for the UI).
+        // Stats + overlay (every other frame is plenty for the UI).
         fpsFrames++
         if (fpsWindowStart == 0L) fpsWindowStart = ts
         if (ts - fpsWindowStart >= 1_000_000_000L) {
@@ -190,18 +255,34 @@ class RenderPipeline(
             fpsFrames = 0
             fpsWindowStart = ts
         }
-        if (frameCounter++ % 2 == 0L) publishOverlay(ts, crop, prediction)
+        if (frameCounter++ % 2 == 0L) {
+            // The overlay must match what is on screen: the live frame, or the delayed output.
+            val out = lastOutput
+            if (previewMode == PreviewMode.OUTPUT && out != null) publishOverlay(out.timestampNs, out.crop, out.track ?: prediction)
+            else publishOverlay(ts, live, prediction)
+        }
+    }
+
+    private fun writeEncoder(enc: EGLSurface, out: LookaheadFramer.Output) {
+        if (out.timestampNs < recordFromNs) return
+        val slot = ring?.find(out.timestampNs) ?: return
+        egl.makeCurrent(enc)
+        GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
+        ring?.draw(slot, out.crop)
+        egl.setPresentationTime(enc, out.timestampNs)
+        egl.swap(enc)
     }
 
     private fun publishOverlay(ts: Long, crop: CropWindow, prediction: TrackPrediction) {
-        val offset = motion.offsetAt(ts)
+        val pose = motion.poseAt(ts)
+        val center = Vec2(srcW / 2.0, srcH / 2.0)
         val target = if (prediction.hasTarget) {
-            val c = prediction.worldAt(ts) + offset
+            val c = pose.toImage(prediction.worldAt(ts), center)
             Box(c.x, c.y, prediction.width, prediction.height)
         } else null
         val dets = tracker.latestDetections.map { d ->
-            // Move boxes from their (older) capture time to this frame using camera motion.
-            val c = d.box.center - motion.offsetAt(d.timestampNs) + offset
+            // Move boxes from their capture time to the displayed frame using camera motion.
+            val c = pose.toImage(motion.poseAt(d.timestampNs).toWorld(d.box.center, center), center)
             d.copy(box = d.box.movedTo(c))
         }
         listener.onOverlay(
@@ -219,6 +300,8 @@ class RenderPipeline(
         return intArrayOf((vw - w) / 2, (vh - h) / 2, w, h)
     }
 
+    private fun even(v: Double): Int = (v / 2).toInt() * 2
+
     private fun runSync(block: () -> Unit) {
         val latch = CountDownLatch(1)
         handler.post {
@@ -235,5 +318,8 @@ class RenderPipeline(
 
     private companion object {
         const val TAG = "RenderPipeline"
+
+        /** Capture window size relative to the crop: room for the look-ahead path to deviate. */
+        const val CAPTURE_MARGIN = 1.25
     }
 }

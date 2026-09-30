@@ -8,24 +8,25 @@
                    │ OIS açık, kamera EIS kapalı           │
                    └───────────────┬───────────────────────┘
                                    │ SurfaceTexture (OES doku)
-                   ┌───────────────▼──────── render thread (GL) ─────────────────┐
-                   │ 1. luma 640x360 (3x3 kutu filtre, 4 piksel/RGBA paketli)     │──► analysis thread
-                   │    + ~10 Hz RGBA 640x360 (sinir ağı için)                    │──► detector thread
-                   │ 2. FramingController.update(ts, tracker.prediction)          │
-                   │ 3. kırpma → MediaCodec giriş yüzeyi (1920x1080, pts = ts)    │──► VideoEncoder ─┐
-                   │ 4. önizleme (geniş / çıkış)                                  │                  │
-                   │ 5. overlay durumu → UI                                        │                  ▼
-                   └──────────────────────────────────────────────────────────────┘             MuxerSink ──► MP4
- Jiroskop (~200-500 Hz) ──► GyroMotionModel ──► (render, analiz, kadraj)            AudioEncoder ─┘
+            ┌──────────────────────▼──────────── render thread (GL) ──────────────────────────┐
+            │ 1. luma 640x360 (+ ~10 Hz RGBA) geri okuma ─────────────────────────────────────┼──► analysis / detector
+            │ 2. nedensel FramingController: zoom + canlı kırpma (önizleme, yakalama penceresi)│
+            │ 3. yakalama penceresi (kırpma × 1.25) → YuvRing (Y R8 + UV RG8, D+3 yuva)         │
+            │ 4. LookaheadFramer: D kare önceki karenin stabilize kırpması (kayma + roll)       │
+            │    → ring'den çiz → MediaCodec (pts = o karenin kamera zamanı) ─────────────────┼──► VideoEncoder ─► Muxer ─► MP4
+            │ 5. önizleme (geniş: canlı / çıkış: kaydedilen), overlay                           │
+            └──────────────────────────────────────────────────────────────────────────────────┘
+ Jiroskop (x, y, z; ~200-500 Hz) ──► GyroMotionModel (poz: kayma + roll)        AudioEncoder ─► Muxer
+ Jiroskop yoksa: VisualMotionEstimator (analysis thread, KLT + RANSAC)
 ```
 
 | Thread | İş | Bütçe |
 |---|---|---|
 | `camera` | Camera2 istekleri, kare meta verisi (pozlama, rolling-shutter skew) | — |
-| `render` | GL: doku güncelle, analiz geri okuma, kırpma çiz (enkoder + önizleme) | < 16 ms |
-| `analysis` | `TargetTracker.process` her kare, gökyüzü dedektörü her 3. (takipteyken 12.) kare | < 16 ms, meşgulse kare atlanır |
+| `render` | GL: doku güncelle, analiz geri okuma, ring'e yazma, gecikmeli kırpmayı çiz (enkoder + önizleme) | < 16 ms |
+| `analysis` | (jiroskop yoksa görsel hareket) + `TargetTracker.process` her kare, gökyüzü dedektörü her 3. (takipteyken 12.) kare | < 16 ms, meşgulse kare atlanır |
 | `detector` | MediaPipe EfficientDet, ~10 Hz, asenkron | serbest |
-| `gyro` | Sensör örnekleri → açı entegrasyonu | — |
+| `gyro` | Sensör örnekleri → 3 eksen açı entegrasyonu | — |
 | `video-encoder`, `audio-encoder` | MediaCodec çıktıları → muxer | — |
 
 Analiz iş parçacığı geride kalırsa kareler **kuyruğa alınmaz, atlanır**; gecikme hiçbir zaman birikmez.
@@ -35,37 +36,55 @@ Analiz iş parçacığı geride kalırsa kareler **kuyruğa alınmaz, atlanır**
 - **Kaynak pikselleri (source px)**: sensör akışının ekranda dik (yatay) görünen hali,
   ör. 3840x2160; x sağa, y aşağı. Takipçi ve kadraj her şeyi bu birimde yayınlar.
 - **Analiz pikselleri**: 640x360 luma; `scale = 3840/640 = 6` kaynak px / analiz px.
-- **Dünya koordinatları**: `dünya = görüntü − CameraMotion.offsetAt(t)`. Kameranın kendi dönüşü
-  çıkarılmış konum. Sabit bir yıldız dünya koordinatlarında durur; el titremesi burada görünmez.
+- **Kamera pozu (`CameraPose`)**: kameranın dönüşünün uzaktaki nesnelere etkisi: görüntü merkezi
+  etrafında `roll` kadar dönme + `offset` kadar kayma. `görüntü = c + R(roll)(dünya − c) + offset`.
+- **Dünya koordinatları**: görüntüden poz çıkarılmış konum (`toWorld`). Sabit bir yıldız dünya
+  koordinatlarında durur; el titremesi (kayma ve roll) burada görünmez.
+- **Kırpma (`CropWindow`)**: merkez, boyut ve dönme; çıkış pikseli u, görüntüde `merkez + R(dönme)·u`.
 - **GL**: `SurfaceTexture` dönüşüm matrisi tamponu cihazın *doğal* yönüne (telefonda dikey) göre
   dik hale getirir. `FrameRenderer` üzerine ekran dönüşünü (`Display.rotation`) uygular.
 
-## Stabilize takip: temel fikir
+## Stabilizasyon
 
-El titremesi yüksek frekanslı ve jiroskopla gecikmesiz ölçülebilir; uçağın hareketi ise düşük
-frekanslı ve fiziksel olarak düzgündür. Bu yüzden ikisi ayrılır:
+DaVinci Resolve gibi masaüstü stabilizörlerin temel fikri: (1) kamera hareketini ölç, (2) kamera
+yolunu *geçmişi ve geleceği görerek* pürüzsüzleştir, (3) her kareyi, gerçek yol ile pürüzsüz yol
+arasındaki farkı kapatacak şekilde kırp/döndür. Uygulama bunu gerçek zamanlı yapar; "gelecek" için
+kaydı birkaç kare geciktirir.
 
-1. **Jiroskop → görüntü kayması.** Küçük açı yaklaşımıyla θ radyanlık dönüş görüntüyü ≈ f·θ piksel
-   kaydırır (f: kaynak piksel cinsinden odak uzaklığı; `LENS_INFO_AVAILABLE_FOCAL_LENGTHS`,
-   `SENSOR_INFO_PHYSICAL_SIZE` ve zum oranından). Cihaz eksenlerinden görüntü eksenlerine eşleme
-   (`GyroMotionModel.forDisplayRotation`) ekran dönüşüne göre türetilmiştir; yatay (ROTATION_90)
-   için `Δx = f·θx`, `Δy = −f·θy`.
-2. **Zaman hizalama.** Kamera zaman damgası ilk satırın pozlama başlangıcıdır; jiroskopla
-   karşılaştırmak için `skew/2 + exposure/2` eklenir (orta satırın pozlama ortası). Zaman kaynağı
-   `REALTIME` değilse `elapsedRealtimeNanos − nanoTime` farkı da eklenir.
-3. **Takip dünya koordinatlarında.** Ölçüm `z = görüntüdeki konum − offset(t)`; sabit hız Kalman
-   filtresi (`KalmanCv1D`, sürekli beyaz-gürültü ivme modeli, değişken dt) bunu süzer. Jiroskop
-   sapması (bias) hem ölçümde hem tahminde aynı ofsetle yer aldığından kısa ufuklarda birbirini götürür.
-4. **Kadraj.** Sanal kamera dünya koordinatlarında kritik sönümlü bir yayla hedefi izler
-   (hız ileri beslemesiyle sabit hızda gecikme ≈ 0, `leadTimeS` kadar öne bakar). Kırpma merkezi
-   `sanal kamera + offset(t)` — yani titreme **aynı karede** geri eklenip iptal edilir.
-   Hedef, kırpmanın merkezî %45'lik bölgesinden çıkamaz; kırpma sensör sınırına dayanırsa
-   yay "wind-up" yapmasın diye sanal kamera sınırdaki konuma çekilir.
-5. **Hedef yokken** hedef = mevcut kare merkezinin dünya konumu; düşük sertlikteki yay bunu izler.
-   Bu, klasik EIS'tir: yavaş pan'lar geçer, titreme kesilir.
+1. **Kamera hareketi.**
+   - *Jiroskop* (`GyroMotionModel`): küçük açı yaklaşımıyla θ radyanlık dönüş görüntüyü ≈ f·θ piksel
+     kaydırır (f: kaynak piksel cinsinden odak uzaklığı). x/y eksenleri kaymaya, z ekseni görüntü
+     roll'una dönüşür (eksen eşlemesi `forDisplayRotation`, işaretler birim testlerde belgeli).
+     Kamera zaman damgasına `skew/2 + exposure/2` eklenerek orta satırın pozlama ortası kullanılır.
+   - *Görüntüden* (`VisualMotionEstimator`, jiroskop yoksa ve kayıtlı videolarda): ızgaraya yayılmış
+     Shi-Tomasi köşeleri, 3 seviyeli piramidal Lucas-Kanade, RANSAC ile rijit dönüşüm (kayma + roll).
+     Hedef uçak maskelenir. Düz gökyüzünde (doku yok) güvenilmez işaretlenir ve son hareketi
+     sönümleyerek sürdürür.
+2. **Takip dünya koordinatlarında.** Kalman filtresi hedefin dünya konumunu izler; titreme ölçümden
+   çıkarıldığı için uçağın gerçek, düzgün hareketi kalır.
+3. **İleriye bakan kamera yolu (`LookaheadFramer` + `PathSmoother`).** Her kare D kare sonra
+   (varsayılan 0.33 s) üretilir. O anda kare için geçmiş 2D ve gelecek D karenin hedefleri bilinir;
+   bu simetrik pencerede şu problem çözülür (x, y ve roll için ayrı):
+   `min Σ a·huber(x − hedef) + w1·ẋ² + w2·ẍ² + w3·x⃛²` — kısıtlar: kırpma sensörün ve yakalama
+   penceresinin içinde, hedef kırpmanın ±%70'inde. Türev ağırlıkları kare süresine göre ölçeklenir
+   (fps'ten bağımsız) ve "yumuşaklık" ayarından (kesim frekansı 2 → 0.2 Hz) türetilir. Bantlı
+   LDLᵀ ile O(n) çözülür (~mikrosaniyeler).
+   - Pencere *hedeflerden* kurulur, önceki çıktılardan değil: geri besleme yok, dolayısıyla salınım
+     yok (ilk denenen "kayan ufuk" yaklaşımı gerçek videolarda salındı).
+   - Hedef terimi Huber'dir: takipçinin yeniden tohumlama sıçramaları kamerayı daha az çeker.
+   - Kısıt ihlali ılımlı bir cezayla bükülür, en son kesin sınırlama yapılır: sert kısıtlar kısa
+     pencerede polinom salınımları üretiyordu.
+   - Hedef yokken hedef = kare merkezinin dünya konumu: klasik EIS (yavaş pan geçer, titreme kesilir).
+4. **Roll (ufuk).** Sanal kameranın roll'u gerçek roll'u yavaşça izler; kırpma aradaki fark kadar
+   döndürülür (en fazla ~5°, ve yalnızca döndürülmüş kırpma sensöre sığıyorsa — 1x zoom'da hiç).
+5. **Gecikme halkası (`YuvRing`).** Kaydedilecek görüntü D kare sonra belli olduğundan, her karenin
+   *yakalama penceresi* (nedensel kırpmanın 1.25 katı) GPU'da YUV olarak saklanır (kare başına
+   ~4.9 MB; 0.33 s @ 60 fps ≈ 110 MB). Çıkış, bu yuvadan afin (kayma + dönme + ölçek) örnekleme ile
+   çizilir ve o karenin kamera zaman damgasıyla kodlanır; ses senkronu bozulmaz. Kayıt durunca
+   bekleyen kareler kısalan bakış penceresiyle tamamlanır.
 
-Jiroskop yoksa `CameraMotion.NONE` kullanılır ve Kalman'ın süreç gürültüsü artırılır (titreme
-hedef hareketi gibi görünür, yay ile yumuşatılır).
+Ön ayarlar: *hızlı* (0.2 s, yumuşaklık 0.4), *dengeli* (0.33 s, 0.6), *sinematik* (0.5 s, 0.8).
+Önizlemede "çıkış" görünümü kaydedilen (gecikmeli, stabilize) görüntüyü gösterir.
 
 ## Otomatik zoom (`AutoZoom`)
 
@@ -160,6 +179,33 @@ Bilinen sınırlamalar:
 - Büyük hedeflerde şablon (en fazla 41x41 analiz pikseli) uçağın merkez kısmını izler; kutu uçağa göre
   biraz kayık görünebilir, kadraj yine de uçağı merkezde tutar.
 
+### Stabilizasyon ölçümleri
+
+Sarsıntı, stabilizörden bağımsız bir ölçümle (OpenCV köşe takibi + RANSAC, `tools/video_bench/shake_metric.py`)
+ölçülür: arka planın kare kare hareketinden kamera yolu çıkarılır, 0.5 s'lik hareketli ortalamadan
+sapma "sarsıntı" sayılır (kasıtlı yumuşak pan cezalandırılmaz). Değerler 1920 px genişliğe
+ölçeklenmiş piksel; çıkışta zoom sarsıntıyı büyütür. Otomatik zoom 1–3x, gecikme 0.5 s, jiroskop
+yerine görsel hareket tahmini (kayıtlı videolar):
+
+| Video | Çıkış sarsıntısı (eski → yeni) | Ani sıçrama / ivme (eski → yeni) | Roll ° (eski → yeni) |
+|---|---|---|---|
+| Bournemouth (Red Arrows, çok uçak) | 81.6 → 59.7 (−27%) | 44.6 → 42.9 | 0.24 → 0.21 |
+| Jim Parker Airshow | 21.0 → 12.8 (−39%) | 10.3 → 7.3 (−30%) | 0.20 → 0.18 |
+| Red Arrows in Action | 70.2 → 43.3 (−38%) | 52.8 → 31.3 (−41%) | 0.33 → 0.24 |
+| Wings Over Georgia | 65.4 → 48.8 (−25%) | 28.8 → 17.6 (−39%) | 0.17 → 0.14 |
+
+F-18 ve F-22 videolarında arka plan düz gökyüzü olduğundan sarsıntı ölçülemez. 2x sabit zoom'da
+(Jim Parker) çıkış sarsıntısı 100 px → 17 px.
+
+Yol boyunca bulunan ve düzeltilen hatalar: "kayan ufuk" optimizasyonunun salınması (geri beslemesiz
+simetrik pencereye geçildi), sert kısıtların kısa pencerede polinom salınımı üretmesi (ılımlı ceza),
+dar hedef sınırının kırpmayı gürültülü ölçüme yapıştırması (merkezleme yumuşak hedef oldu), bantlı
+LDLᵀ'de sütun sırası hatası, görsel hareket tahmininde düşük dokulu gökyüzünde özellik bulunamaması
+(karelerin %52'si → %97'si güvenilir) ve metrikte zoom'un ötelemeye sızması.
+
+Kayıtlı videolarda jiroskop yok; gerçek cihazda jiroskop kamera hareketini gecikmesiz ve daha
+doğru verdiği için sonuçların daha iyi olması beklenir (cihazda doğrulanmalı).
+
 ## Cihazda doğrulama listesi
 
 Bu kod bulut ortamında yazıldı; derleniyor ve `tracking` testleri geçiyor ama kamera/GL/sensör
@@ -180,17 +226,18 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
 
 Öncelik sırasına göre öneriler:
 
-1. **Gecikmeli (look-ahead) kayıt**: enkodere kareleri ~10 kare (≈166 ms) geç göndermek; kadraj
-   o sırada "gelecekteki" ölçümleri de bilir → nedensel olmayan, çok daha yumuşak kamera yolu
-   (post-prodüksiyon stabilizasyonu kalitesi, gerçek zamanlı).
-2. **Yüksek çözünürlüklü ROI**: hedef çevresinden tam çözünürlükte 256x256 geri okuma; küçük
-   hedeflerde alt-piksel hassasiyet ve ROI üzerinde sinir ağı (tile) tespiti.
-3. **Asenkron geri okuma (PBO)** ile render thread'deki `glReadPixels` beklemesini kaldırmak.
-4. **Roll (optik eksen etrafında dönme) telafisi** ve rolling-shutter düzeltmesi (satır bazlı
-   jiroskop warp'ı) — hızlı pan'larda eğilmeyi azaltır.
-5. **Uçak odaklı model**: uzak/küçük uçak veri setiyle eğitilmiş dedektör (YOLO-nano vb.),
-   sonra kuş, drone, helikopter, araç gibi sınıflar.
-6. **Otomatik zum**: hedefin kadrajdaki boyutunu sabit tutmak (kırpma + lens zumu birlikte).
-7. **ADS-B entegrasyonu**: yakındaki uçakların konumundan hedefin ekrandaki yerini tahmin edip
+1. **Rolling-shutter düzeltmesi**: hızlı pan'larda satır bazlı jiroskop warp'ı (4K sensörde okuma
+   ~15–30 ms; uçak takibinde eğilme/jöle etkisi belirgin).
+2. **Jiroskop + görüntü füzyonu**: görsel tahminle jiroskobun zaman ofseti ve odak ölçeğini cihazda
+   otomatik kalibre etmek; ikisini birleştirip kalan kaymayı gidermek.
+3. **Takipçi ölçüm kalitesi**: yeniden tohumlama sıçramaları (şablon ↔ tespit kutusu merkezi) hâlâ
+   kalan sarsıntının ana kaynağı; kutu merkezi yerine şablon kaydı ile hizalama.
+4. **Yüksek çözünürlüklü ROI**: hedef çevresinden tam çözünürlükte geri okuma; küçük hedeflerde
+   alt-piksel hassasiyet ve ROI üzerinde sinir ağı (tile) tespiti.
+5. **Asenkron geri okuma (PBO)** ile render thread'deki `glReadPixels` beklemesini kaldırmak.
+6. **Uçak odaklı model**: uzak/küçük uçak veri setiyle eğitilmiş dedektör, sonra helikopter, drone,
+   kuş gibi sınıflar.
+7. **Hibrit zoom**: otomatik zoom kırpma sınırına dayanınca lens zumunu kontrollü değiştirmek.
+8. **ADS-B entegrasyonu**: yakındaki uçakların konumundan hedefin ekrandaki yerini tahmin edip
    ön-kilit, kaybolunca arama yönü.
-8. Eşzamanlı ham 4K kayıt, 10-bit HEVC / log profil, tam manuel pozlama arayüzü.
+9. Eşzamanlı ham 4K kayıt, 10-bit HEVC / log profil, tam manuel pozlama arayüzü.

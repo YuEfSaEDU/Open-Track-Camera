@@ -17,6 +17,8 @@ class FrameRenderer {
     private val quad = GlUtil.floatBuffer(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
     private val display = Program(DISPLAY_FRAGMENT)
     private val luma = Program(LUMA_FRAGMENT)
+    private val planeY = Program(PLANE_Y_FRAGMENT)
+    private val planeUv = Program(PLANE_UV_FRAGMENT)
 
     var displayRotationQuarterTurns: Int = 1
 
@@ -44,9 +46,28 @@ class FrameRenderer {
         luma.draw(texture, texMatrix, 0f, 0f, 1f, 1f, true, 1f / analysisWidth, 1f / analysisHeight)
     }
 
+    /**
+     * Stores the [left, top, width, height] image region as BT.601 full-range luma into the
+     * bound R8 framebuffer (image top in texture row 0).
+     */
+    fun drawLumaPlane(texture: Int, texMatrix: FloatArray, left: Float, top: Float, width: Float, height: Float) {
+        planeY.draw(texture, texMatrix, left, top, width, height, true, 0f, 0f)
+    }
+
+    /**
+     * Stores the region's chroma (Cb, Cr + 0.5) into the bound half-resolution RG8
+     * framebuffer, averaging 2x2 full-resolution samples. [pxW]/[pxH]: size of one
+     * full-resolution plane pixel in normalized image units.
+     */
+    fun drawChromaPlane(texture: Int, texMatrix: FloatArray, left: Float, top: Float, width: Float, height: Float, pxW: Float, pxH: Float) {
+        planeUv.draw(texture, texMatrix, left, top, width, height, true, pxW, pxH)
+    }
+
     fun release() {
         display.release()
         luma.release()
+        planeY.release()
+        planeUv.release()
     }
 
     private inner class Program(fragment: String) {
@@ -111,6 +132,27 @@ class FrameRenderer {
         const val DISPLAY_FRAGMENT = COMMON + """
             void main() {
                 gl_FragColor = texture2D(sTex, imgToTex(vImg));
+            }
+        """
+
+        const val PLANE_Y_FRAGMENT = COMMON + """
+            void main() {
+                float y = dot(texture2D(sTex, imgToTex(vImg)).rgb, vec3(0.299, 0.587, 0.114));
+                gl_FragColor = vec4(y, 0.0, 0.0, 1.0);
+            }
+        """
+
+        const val PLANE_UV_FRAGMENT = COMMON + """
+            uniform vec2 uPx;
+            void main() {
+                vec3 c = texture2D(sTex, imgToTex(vImg + vec2(-0.5, -0.5) * uPx)).rgb
+                       + texture2D(sTex, imgToTex(vImg + vec2(0.5, -0.5) * uPx)).rgb
+                       + texture2D(sTex, imgToTex(vImg + vec2(-0.5, 0.5) * uPx)).rgb
+                       + texture2D(sTex, imgToTex(vImg + vec2(0.5, 0.5) * uPx)).rgb;
+                c *= 0.25;
+                float cb = -0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b + 0.5;
+                float cr = 0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b + 0.5;
+                gl_FragColor = vec4(cb, cr, 0.0, 1.0);
             }
         """
 

@@ -26,9 +26,12 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
     (yerel arka plan farkı + sakin halka testi). Sinir ağının göremediği küçük hedefler için.
 - **60 fps takip**: NCC şablon eşleme (alt-piksel), sabit hız Kalman filtresi, kaybolunca tahminle
   devam (coasting) ve tespitlerle yeniden yakalama.
-- **Jiroskop tabanlı stabilizasyon**: Takip ve kadraj "dünya" koordinatlarında (kamera dönüşü
-  çıkarılmış) yapılır; el titremesi gecikmesiz iptal edilir, sanal kamera ise kritik sönümlü yayla
-  yumuşak hareket eder. Hedef yokken aynı sistem normal elektronik stabilizasyon (EIS) gibi çalışır.
+- **İleriye bakan stabilizasyon** (DaVinci Resolve'un yaklaşımının gerçek zamanlı hali):
+  kamera hareketi jiroskoptan (jiroskop yoksa görüntüden, KLT + RANSAC) ölçülür; kayıt birkaç kare
+  (0.2–0.5 s) geciktirilir ve kamera yolu geçmiş + gelecek kareler görülerek optimize edilir
+  (hız/ivme/sarsıntı cezası, kırpma ve hedef kısıtları). Kayma ve **roll (ufuk)** birlikte düzeltilir.
+  Geçmiş kareler GPU'da YUV halka tamponda tutulur. Hedef yokken normal EIS gibi çalışır.
+  Ön ayarlar: hızlı / dengeli / sinematik.
 - **Uçak fotoğrafçılığı ayarları**: sonsuza sabit odak (gökyüzünde AF aramasını önler), EV,
   hızlı enstantane (≈1/1000 s, ISO otomatik türetilir), OIS açık / kamera EIS kapalı.
 - **Otomatik zoom**: kullanıcının belirlediği min/max sınırlar içinde hedefi çıkışta sabit boyutta
@@ -53,14 +56,18 @@ Minimum Android 11 (API 30). 4K60 için cihazın arka kamerasının `SurfaceText
 ## Gerçek videolarda test
 
 ```bash
-pip install imageio-ffmpeg numpy pillow mediapipe
+pip install imageio-ffmpeg numpy opencv-python-headless mediapipe
 ./gradlew :bench:installDist
 python3 tools/video_bench/run_bench.py video1.mp4 video2.webm --out bench_out --auto-zoom --zoom-min 1 --zoom-max 3
+# eski (nedensel) kadrajla karşılaştırma:
+python3 tools/video_bench/run_bench.py video1.mp4 --out bench_out --auto-zoom --tag _old --bench-args "--stabilizer old --motion none"
 ```
 
-Her video için `bench_out/` altında takip CSV'si, metrikler (`summary.json`), sol tarafı geniş görünüm
-(beyaz: kırpma, yeşil: hedef, mavi: sinir ağı) ve sağ tarafı kaydedilecek çıkış olan bir `.mp4` ile
-kare kolajı üretilir. Kayıtlı videolarda jiroskop verisi olmadığından bu test jiroskopsuz yolu ölçer.
+Her video için `bench_out/` altında takip CSV'si, metrikler (`summary.json`: takip oranları, giriş/çıkış
+sarsıntısı, roll, hedef titremesi), sol tarafı geniş görünüm (beyaz: kırpma, yeşil: hedef, mavi: sinir
+ağı) ve sağ tarafı kaydedilecek çıkış olan bir `.mp4` ile kare kolajı üretilir. Sarsıntı, stabilizörden
+bağımsız olarak OpenCV ile ölçülür. Kayıtlı videolarda jiroskop verisi olmadığından kamera hareketi
+görüntüden tahmin edilir.
 
 ## Proje yapısı
 

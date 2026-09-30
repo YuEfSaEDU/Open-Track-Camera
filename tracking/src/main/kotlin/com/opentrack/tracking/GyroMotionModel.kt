@@ -34,10 +34,12 @@ class GyroMotionModel(capacity: Int = 4096) : CameraMotion {
     private val times = LongArray(capacity)
     private val thetaX = DoubleArray(capacity)
     private val thetaY = DoubleArray(capacity)
+    private val thetaZ = DoubleArray(capacity)
     private var head = -1
     private var count = 0
     private var lastRateX = 0.0
     private var lastRateY = 0.0
+    private var lastRateZ = 0.0
     private val lock = Any()
 
     fun reset() = synchronized(lock) {
@@ -45,12 +47,13 @@ class GyroMotionModel(capacity: Int = 4096) : CameraMotion {
         count = 0
         lastRateX = 0.0
         lastRateY = 0.0
+        lastRateZ = 0.0
     }
 
-    /** Angular rates in rad/s around the device X and Y axes (Android sensor convention). */
-    fun onGyroSample(timestampNs: Long, rateX: Double, rateY: Double) = synchronized(lock) {
+    /** Angular rates in rad/s around the device X, Y and Z axes (Android sensor convention). */
+    fun onGyroSample(timestampNs: Long, rateX: Double, rateY: Double, rateZ: Double = 0.0) = synchronized(lock) {
         if (count == 0) {
-            push(timestampNs, 0.0, 0.0)
+            push(timestampNs, 0.0, 0.0, 0.0)
         } else {
             val prevT = times[head]
             if (timestampNs <= prevT) return@synchronized
@@ -58,38 +61,50 @@ class GyroMotionModel(capacity: Int = 4096) : CameraMotion {
             // Trapezoidal integration.
             val tx = thetaX[head] + 0.5 * (lastRateX + rateX) * dt
             val ty = thetaY[head] + 0.5 * (lastRateY + rateY) * dt
-            push(timestampNs, tx, ty)
+            val tz = thetaZ[head] + 0.5 * (lastRateZ + rateZ) * dt
+            push(timestampNs, tx, ty, tz)
         }
         lastRateX = rateX
         lastRateY = rateY
+        lastRateZ = rateZ
     }
 
-    private fun push(t: Long, tx: Double, ty: Double) {
+    private fun push(t: Long, tx: Double, ty: Double, tz: Double) {
         head = (head + 1) % times.size
         times[head] = t
         thetaX[head] = tx
         thetaY[head] = ty
+        thetaZ[head] = tz
         if (count < times.size) count++
     }
 
-    override fun offsetAt(timestampNs: Long): Vec2 {
+    /**
+     * Rotation about the optical axis: the device turning counter-clockwise (positive rate
+     * around device Z, which points out of the screen towards the user) makes the scene seen
+     * by the back camera turn clockwise on screen, i.e. positive image roll.
+     */
+    @Volatile
+    var rollSign: Double = 1.0
+
+    override fun poseAt(timestampNs: Long): CameraPose {
         val f = focalPx
-        if (f <= 0.0) return Vec2.ZERO
-        val (tx, ty) = synchronized(lock) { anglesAt(timestampNs + cameraToGyroOffsetNs) } ?: return Vec2.ZERO
+        if (f <= 0.0) return CameraPose.IDENTITY
+        val a = synchronized(lock) { anglesAt(timestampNs + cameraToGyroOffsetNs) } ?: return CameraPose.IDENTITY
         val m = axisMap
-        return Vec2(f * (m.xFromThetaX * tx + m.xFromThetaY * ty), f * (m.yFromThetaX * tx + m.yFromThetaY * ty))
+        val offset = Vec2(f * (m.xFromThetaX * a[0] + m.xFromThetaY * a[1]), f * (m.yFromThetaX * a[0] + m.yFromThetaY * a[1]))
+        return CameraPose(offset, rollSign * a[2])
     }
 
-    private fun anglesAt(t: Long): Pair<Double, Double>? {
+    private fun anglesAt(t: Long): DoubleArray? {
         if (count == 0) return null
         val size = times.size
         val newest = head
         if (t >= times[newest]) {
             val dt = (minOf(t - times[newest], maxExtrapolationNs)) * 1e-9
-            return Pair(thetaX[newest] + lastRateX * dt, thetaY[newest] + lastRateY * dt)
+            return doubleArrayOf(thetaX[newest] + lastRateX * dt, thetaY[newest] + lastRateY * dt, thetaZ[newest] + lastRateZ * dt)
         }
         val oldest = (head - count + 1 + size) % size
-        if (t <= times[oldest]) return Pair(thetaX[oldest], thetaY[oldest])
+        if (t <= times[oldest]) return doubleArrayOf(thetaX[oldest], thetaY[oldest], thetaZ[oldest])
         // Binary search over the logical (chronological) index.
         var lo = 0
         var hi = count - 1
@@ -101,7 +116,11 @@ class GyroMotionModel(capacity: Int = 4096) : CameraMotion {
         val b = (oldest + hi) % size
         val span = (times[b] - times[a]).toDouble()
         val w = if (span <= 0) 0.0 else (t - times[a]) / span
-        return Pair(thetaX[a] + (thetaX[b] - thetaX[a]) * w, thetaY[a] + (thetaY[b] - thetaY[a]) * w)
+        return doubleArrayOf(
+            thetaX[a] + (thetaX[b] - thetaX[a]) * w,
+            thetaY[a] + (thetaY[b] - thetaY[a]) * w,
+            thetaZ[a] + (thetaZ[b] - thetaZ[a]) * w,
+        )
     }
 
     companion object {

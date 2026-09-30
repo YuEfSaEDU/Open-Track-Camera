@@ -10,7 +10,7 @@ class TargetTrackerTest {
     @Test
     fun autoAcquiresAndTracksWithCameraShake() {
         // Camera shake: sinusoidal offset known to the tracker through CameraMotion.
-        val shake = CameraMotion { t -> Vec2(30.0 * kotlin.math.sin(t * 1e-9 * 20), 18.0 * kotlin.math.cos(t * 1e-9 * 13)) }
+        val shake = CameraMotion { t -> CameraPose(Vec2(30.0 * kotlin.math.sin(t * 1e-9 * 20), 18.0 * kotlin.math.cos(t * 1e-9 * 13)), 0.0) }
         val tracker = TargetTracker(shake)
         val scale = 4.0
         val detector = SkyBlobDetector()
@@ -20,7 +20,7 @@ class TargetTrackerTest {
         var last = TrackPrediction.IDLE
         for (i in 0 until 120) {
             val t = i * frameNs
-            val image = worldStart + worldVel * (t * 1e-9) + shake.offsetAt(t)
+            val image = worldStart + worldVel * (t * 1e-9) + shake.poseAt(t).offset
             val frame = SyntheticSky.frame(timestampNs = t, scale = scale, objects = listOf(image / scale to 2.0), seed = i)
             val dets = if (i % 6 == 0) detector.detect(frame) else emptyList()
             last = tracker.process(frame, dets)

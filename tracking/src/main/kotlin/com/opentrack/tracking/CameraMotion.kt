@@ -1,17 +1,38 @@
 package com.opentrack.tracking
 
+import kotlin.math.cos
+import kotlin.math.sin
+
 /**
- * Where the image content has moved because the camera itself rotated.
+ * Camera orientation relative to a fixed (arbitrary) reference, expressed as what it does to
+ * the image of distant objects: a rotation by [roll] radians about the image center followed
+ * by a shift of [offset] source pixels. Positive roll turns the image clockwise on screen
+ * (image y axis points down).
  *
- * [offsetAt] returns, in source pixels, how far a point at infinity appears displaced at
- * [timestampNs] relative to an arbitrary (but fixed) reference orientation. Subtracting it
- * from an image position yields a "world" (orientation-stabilized) position; adding it
- * back maps a world position into the image of that frame.
+ * "World" coordinates are image coordinates with this pose removed: a static distant object
+ * keeps the same world position while the camera shakes, pans or rolls.
  */
-fun interface CameraMotion {
-    fun offsetAt(timestampNs: Long): Vec2
+data class CameraPose(val offset: Vec2, val roll: Double) {
+    fun toImage(world: Vec2, center: Vec2): Vec2 = center + (world - center).rotated(roll) + offset
+    fun toWorld(image: Vec2, center: Vec2): Vec2 = center + (image - center - offset).rotated(-roll)
 
     companion object {
-        val NONE = CameraMotion { Vec2.ZERO }
+        val IDENTITY = CameraPose(Vec2.ZERO, 0.0)
     }
+}
+
+/** Source of [CameraPose] over time (gyroscope, visual motion estimation, or none). */
+fun interface CameraMotion {
+    fun poseAt(timestampNs: Long): CameraPose
+
+    companion object {
+        val NONE = CameraMotion { CameraPose.IDENTITY }
+    }
+}
+
+fun Vec2.rotated(angle: Double): Vec2 {
+    if (angle == 0.0) return this
+    val c = cos(angle)
+    val s = sin(angle)
+    return Vec2(c * x - s * y, s * x + c * y)
 }
