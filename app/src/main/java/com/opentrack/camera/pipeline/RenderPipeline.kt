@@ -50,6 +50,8 @@ class RenderPipeline(
     private val outputHeight: Int,
     private val displayRotationQuarterTurns: Int,
     private val listener: Listener,
+    /** Render with 10-bit colour (for a 10-bit HEVC recording). */
+    private val tenBit: Boolean = false,
 ) : SurfaceTexture.OnFrameAvailableListener {
 
     interface Listener {
@@ -59,6 +61,10 @@ class RenderPipeline(
     }
 
     @Volatile var previewMode = PreviewMode.WIDE
+
+    /** The GL output really is 10-bit (the phone offered a 10-bit EGL config). */
+    @Volatile var tenBitActive = false
+        private set
 
     /**
      * While recording: the live crop and camera pose of every frame ("live") and the crop each
@@ -122,7 +128,8 @@ class RenderPipeline(
     private var frameCounter = 0L
 
     fun start() = handler.post {
-        egl = EglCore()
+        egl = EglCore(tenBit)
+        tenBitActive = egl.tenBit
         pbuffer = egl.createPbuffer()
         egl.makeCurrent(pbuffer)
         renderer = FrameRenderer().also { it.displayRotationQuarterTurns = displayRotationQuarterTurns }

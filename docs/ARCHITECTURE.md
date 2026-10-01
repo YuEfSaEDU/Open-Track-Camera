@@ -338,6 +338,13 @@ perspektifle). İkisi de bilineerdi; yumuşaklık birikiyordu.
 - `MuxerSink` tüm izlerin formatı gelene kadar örnekleri tamponlar (ilk anahtar kare kaybolmaz),
   zamanları `CLOCK_MONOTONIC`'e çevirip ilk video karesine göre sıfırlar.
 - Dosya `MediaStore` üzerinden `Movies/OpenTrack/OTC_yyyyMMdd_HHmmss.mp4` olarak yazılır.
+- Codec (`VideoCodec`): H.264, HEVC veya HEVC 10-bit (Main10). 10-bit'te `EglCore` RGBA 1010102
+  (10/10/10/2 tam eşleşen, kaydedilebilir) bir yapılandırma seçer; boru hattının tüm yüzeyleri onu
+  kullanır, kodlayıcı girişine 10-bit RGB gider. Halka ve kamera akışı 8-bit kalır: kazanç, kodlayıcının
+  düz gökyüzünde 8 bitte yaptığı bantlanmanın ve GPU'nun ara değerlerinin (bikübik, keskinleştirme)
+  korunmasından gelir. Gerçek 10-bit yakalama Android'de HDR (HLG10) demektir; ayrı bir iş.
+  Renk tanımı BT.709 SDR, sınırlı aralık. `VideoCodec.pick` seçileni boyut/kare hızı ve Main10
+  desteğine göre doğrular, olmazsa HEVC → H.264'e düşer.
 
 ### Kayıt günlüğü (`Telemetry`)
 

@@ -65,4 +65,13 @@
     <string name="output_res">Çıkış: %s</string>
     <string name="ois_on">OIS: açık</string>
     <string name="ois_off">OIS: kapalı</string>
+    <string name="codec">Codec: %s</string>
+    <string name="codec_avc">H.264</string>
+    <string name="codec_hevc">HEVC</string>
+    <string name="codec_hevc10">HEVC 10-bit</string>
+    <string name="codec_unsupported">%s bu boyut ve kare hızında desteklenmiyor; kayıt başka bir codec\'e düşecek.</string>
+    <string name="codec_fallback">%1$s kullanılamadı, %2$s olarak kaydedildi.</string>
+    <string name="codec_no_10bit_gl">Bu telefonda 10-bit GPU çıkışı yok: 10-bit HEVC 8-bit karelerden (yumuşak gök geçişi yalnızca kodlayıcıdan).</string>
+    <string name="share">Paylaş</string>
+    <string name="share_missing">Son video artık yok.</string>
 </resources>

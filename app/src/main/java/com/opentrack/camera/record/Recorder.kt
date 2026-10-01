@@ -2,8 +2,6 @@ package com.opentrack.camera.record
 
 import android.content.ContentResolver
 import android.content.ContentValues
-import android.media.MediaCodecList
-import android.media.MediaFormat
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
@@ -28,7 +26,7 @@ data class RecordingConfig(
     val height: Int = 1080,
     val fps: Int = 60,
     val bitrate: Int = 40_000_000,
-    val preferHevc: Boolean = false,
+    val codec: VideoCodec = VideoCodec.AVC,
     val audio: Boolean = true,
 )
 
@@ -73,8 +71,8 @@ class Recorder(private val resolver: ContentResolver) {
         val s = MuxerSink(fd.fileDescriptor, wantAudio)
         sink = s
         val offsetNs = if (cameraTimestampRealtime) System.nanoTime() - SystemClock.elapsedRealtimeNanos() else 0L
-        val mime = if (config.preferHevc && hasEncoder(MediaFormat.MIMETYPE_VIDEO_HEVC)) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
-        val v = VideoEncoder(config.width, config.height, config.fps, config.bitrate, mime, s, offsetNs)
+        val codec = VideoCodec.pick(config.codec, config.width, config.height, config.fps)
+        val v = VideoEncoder(config.width, config.height, config.fps, config.bitrate, codec, s, offsetNs)
         video = v
         if (wantAudio) {
             val a = AudioEncoder(s)
@@ -108,9 +106,4 @@ class Recorder(private val resolver: ContentResolver) {
         resolver.update(u, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
         return u
     }
-
-    private fun hasEncoder(mime: String): Boolean =
-        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
-            info.isEncoder && info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
-        }
 }

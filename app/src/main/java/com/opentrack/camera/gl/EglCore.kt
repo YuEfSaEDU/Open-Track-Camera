@@ -10,22 +10,29 @@ import android.view.Surface
 
 /**
  * Minimal EGL wrapper: one GLES 3 context whose config is recordable, so the same context
- * can render into the preview SurfaceView and into the MediaCodec input surface.
+ * can render into the preview SurfaceView and into the MediaCodec input surface. With
+ * [wantTenBit], the config has 10-bit colour channels (RGBA 1010102) for a 10-bit video
+ * encoder; [tenBit] says whether the phone offered one (else 8-bit, as usual).
  */
-class EglCore {
+class EglCore(wantTenBit: Boolean = false) {
     val display: EGLDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
     private val config: EGLConfig
     private val supportsPbuffer: Boolean
     val context: EGLContext
+    val tenBit: Boolean
 
     init {
         check(display != EGL14.EGL_NO_DISPLAY) { "no EGL display" }
         val version = IntArray(2)
         check(EGL14.eglInitialize(display, version, 0, version, 1)) { "eglInitialize failed" }
         // Prefer a config that also supports pbuffers; otherwise run surfaceless when no window is bound.
-        val withPbuffer = chooseConfig(EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT)
+        val ten = if (wantTenBit) {
+            chooseConfig(EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT, 10) ?: chooseConfig(EGL14.EGL_WINDOW_BIT, 10)
+        } else null
+        tenBit = ten != null
+        val withPbuffer = if (ten != null) ten.takeIf { hasPbuffer(it) } else chooseConfig(EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT, 8)
         supportsPbuffer = withPbuffer != null
-        config = withPbuffer ?: chooseConfig(EGL14.EGL_WINDOW_BIT) ?: error("no recordable GLES3 EGL config")
+        config = withPbuffer ?: ten ?: chooseConfig(EGL14.EGL_WINDOW_BIT, 8) ?: error("no recordable GLES3 EGL config")
         context = EGL14.eglCreateContext(
             display, config, EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE), 0,
@@ -51,21 +58,38 @@ class EglCore {
             EGL14.EGL_NO_SURFACE
         }
 
-    private fun chooseConfig(surfaceType: Int): EGLConfig? {
+    /**
+     * A recordable GLES 3 config with [bits] per colour channel (8: RGBA 8888, 10: RGBA 1010102,
+     * exactly: eglChooseConfig also returns larger, e.g. half-float, configs).
+     */
+    private fun chooseConfig(surfaceType: Int, bits: Int): EGLConfig? {
+        val alpha = if (bits == 10) 2 else 8
         val attribs = intArrayOf(
-            EGL14.EGL_RED_SIZE, 8,
-            EGL14.EGL_GREEN_SIZE, 8,
-            EGL14.EGL_BLUE_SIZE, 8,
-            EGL14.EGL_ALPHA_SIZE, 8,
+            EGL14.EGL_RED_SIZE, bits,
+            EGL14.EGL_GREEN_SIZE, bits,
+            EGL14.EGL_BLUE_SIZE, bits,
+            EGL14.EGL_ALPHA_SIZE, alpha,
             EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
             EGL14.EGL_SURFACE_TYPE, surfaceType,
             EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_NONE,
         )
-        val configs = arrayOfNulls<EGLConfig>(1)
+        val configs = arrayOfNulls<EGLConfig>(32)
         val num = IntArray(1)
-        return if (EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, num, 0) && num[0] > 0) configs[0] else null
+        if (!EGL14.eglChooseConfig(display, attribs, 0, configs, 0, configs.size, num, 0)) return null
+        return configs.take(num[0]).filterNotNull().firstOrNull { c ->
+            attrib(c, EGL14.EGL_RED_SIZE) == bits && attrib(c, EGL14.EGL_GREEN_SIZE) == bits &&
+                attrib(c, EGL14.EGL_BLUE_SIZE) == bits && attrib(c, EGL14.EGL_ALPHA_SIZE) == alpha
+        }
     }
+
+    private fun attrib(c: EGLConfig, name: Int): Int {
+        val v = IntArray(1)
+        EGL14.eglGetConfigAttrib(display, c, name, v, 0)
+        return v[0]
+    }
+
+    private fun hasPbuffer(c: EGLConfig): Boolean = attrib(c, EGL14.EGL_SURFACE_TYPE) and EGL14.EGL_PBUFFER_BIT != 0
 
     fun makeCurrent(surface: EGLSurface) {
         check(EGL14.eglMakeCurrent(display, surface, surface, context)) { "eglMakeCurrent failed" }

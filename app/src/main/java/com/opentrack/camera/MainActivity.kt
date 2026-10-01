@@ -38,6 +38,7 @@ import com.opentrack.camera.pipeline.PreviewMode
 import com.opentrack.camera.pipeline.RenderPipeline
 import com.opentrack.camera.record.Recorder
 import com.opentrack.camera.record.RecordingConfig
+import com.opentrack.camera.record.VideoCodec
 import com.opentrack.camera.record.bitrateFor
 import com.opentrack.camera.sensor.GyroSource
 import com.opentrack.camera.ui.OverlayView
@@ -116,6 +117,9 @@ class MainActivity : AppCompatActivity() {
     private var outputHeight = 1080
     /** Output long side for 4K-class sources: 1920 (1080p) or 2560 (1440p). */
     private var outputLongSide = 1920
+    private var codec = VideoCodec.AVC
+    /** The last saved recording or processed video, for the share button. */
+    private var lastVideo: android.net.Uri? = null
     private var lastStatusMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -125,6 +129,8 @@ class MainActivity : AppCompatActivity() {
         detectorMode = AnalysisEngine.Mode.entries.firstOrNull { it.name == prefs.getString(PREF_DETECTOR, null) } ?: detectorMode
         targetClasses = TargetClasses.entries.firstOrNull { it.name == prefs.getString(PREF_TARGET, null) } ?: targetClasses
         outputLongSide = prefs.getInt(PREF_OUTPUT, 1920)
+        codec = VideoCodec.entries.firstOrNull { it.name == prefs.getString(PREF_CODEC, null) } ?: codec
+        lastVideo = prefs.getString(PREF_LAST_VIDEO, null)?.let { android.net.Uri.parse(it) }
         lastCrash = CrashLog.last(this)
         if (lastCrash != null) Toast.makeText(this, R.string.crash_recorded, Toast.LENGTH_LONG).show()
         setContentView(R.layout.activity_main)
@@ -199,6 +205,23 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.resolution).setOnClickListener { cycleResolution() }
         findViewById<Button>(R.id.lens).setOnClickListener { cycleLens() }
+        findViewById<Button>(R.id.codec).setOnClickListener {
+            if (recorder?.isRecording == true) return@setOnClickListener
+            val all = VideoCodec.entries
+            val next = all[(codec.ordinal + 1) % all.size]
+            val restart = next.tenBit != codec.tenBit // the GL output's bit depth is chosen at start
+            codec = next
+            prefs.edit { putString(PREF_CODEC, next.name) }
+            if (!next.supported(outputWidth, outputHeight, profile?.fps ?: 60)) {
+                Toast.makeText(this, getString(R.string.codec_unsupported, codecName(next)), Toast.LENGTH_LONG).show()
+            }
+            if (restart) {
+                stopPipeline()
+                startPipeline()
+            }
+            refreshButtons()
+        }
+        findViewById<Button>(R.id.share).setOnClickListener { shareLastVideo() }
         findViewById<Button>(R.id.ois).setOnClickListener {
             prefs.edit { putBoolean(PREF_OIS, !settings.ois) }
             updateSettings(settings.copy(ois = !settings.ois))
@@ -335,7 +358,7 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread { showStatus(state) }
                 }
             }
-        })
+        }, tenBit = codec.tenBit)
         rp.previewMode = previewMode
         rp.focalPx = p.focalPx * settings.zoomRatio
         pipeline = rp
@@ -435,6 +458,40 @@ class MainActivity : AppCompatActivity() {
         refreshButtons()
     }
 
+    private fun codecName(c: VideoCodec): String = getString(
+        when (c) {
+            VideoCodec.AVC -> R.string.codec_avc
+            VideoCodec.HEVC -> R.string.codec_hevc
+            VideoCodec.HEVC_10 -> R.string.codec_hevc10
+        },
+    )
+
+    private fun rememberVideo(uri: android.net.Uri) {
+        lastVideo = uri
+        prefs.edit { putString(PREF_LAST_VIDEO, uri.toString()) }
+        refreshButtons()
+    }
+
+    /**
+     * Shares the last recording (or processed video) as a file through Android's share sheet:
+     * Instagram, WhatsApp etc. take it like a gallery upload, their own cameras never involved.
+     */
+    private fun shareLastVideo() {
+        val uri = lastVideo ?: return
+        val exists = runCatching { contentResolver.openFileDescriptor(uri, "r")?.close() }.isSuccess
+        if (!exists) {
+            Toast.makeText(this, R.string.share_missing, Toast.LENGTH_SHORT).show()
+            lastVideo = null
+            prefs.edit { remove(PREF_LAST_VIDEO) }
+            refreshButtons()
+            return
+        }
+        val send = Intent(Intent.ACTION_SEND).setType("video/mp4")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent.createChooser(send, getString(R.string.share)))
+    }
+
     /** Button text for the current lens. */
     private fun lensLabel(): String {
         val l = lens ?: return getString(R.string.lens, getString(R.string.lens_main), 1.0, "")
@@ -459,13 +516,14 @@ class MainActivity : AppCompatActivity() {
         status.text = getString(R.string.processing, 0, 0.0)
         val p = VideoProcessor(
             applicationContext, uri, sharedDetector(), zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) },
-            targetClasses.labels, detectorMode != AnalysisEngine.Mode.NEURAL_ONLY, outputLongSide,
+            targetClasses.labels, detectorMode != AnalysisEngine.Mode.NEURAL_ONLY, outputLongSide, codec,
             object : VideoProcessor.Listener {
             override fun onProgress(fraction: Double, processingFps: Double) = runOnUiThread {
                 status.text = getString(R.string.processing, (fraction * 100).roundToInt(), processingFps) + " · " + (detector?.shortStatus() ?: "NN -")
             }
 
             override fun onFinished(output: android.net.Uri?, error: String?) = runOnUiThread {
+                output?.let { rememberVideo(it) }
                 processor = null
                 if (error != null) lastProcessingError = error
                 refreshButtons()
@@ -639,11 +697,16 @@ class MainActivity : AppCompatActivity() {
         val rec = Recorder(contentResolver)
         try {
             val enc = rec.start(
-                RecordingConfig(width = outputWidth, height = outputHeight, fps = p.fps, bitrate = bitrateFor(outputWidth)),
+                RecordingConfig(width = outputWidth, height = outputHeight, fps = p.fps, bitrate = bitrateFor(outputWidth), codec = codec),
                 cameraTimestampRealtime = p.timestampRealtime,
                 audioAllowed = hasPermission(Manifest.permission.RECORD_AUDIO),
             )
+            when {
+                enc.codec != codec -> Toast.makeText(this, getString(R.string.codec_fallback, codecName(codec), codecName(enc.codec)), Toast.LENGTH_LONG).show()
+                codec.tenBit && !rp.tenBitActive -> Toast.makeText(this, R.string.codec_no_10bit_gl, Toast.LENGTH_LONG).show()
+            }
             if (prefs.getBoolean(PREF_TELEMETRY, true)) startTelemetry(rec.baseName ?: "OTC", p)
+            telemetry?.line("codec")?.s("codec", enc.codec.name)?.b("glTenBit", rp.tenBitActive)?.i("bitrate", bitrateFor(outputWidth))?.send()
             rp.attachEncoder(enc.inputSurface, enc.width, enc.height)
             recorder = rec
             recordButton.isActivated = true
@@ -667,6 +730,7 @@ class MainActivity : AppCompatActivity() {
             val uri = rec.stop()
             log?.close()
             runOnUiThread {
+                if (uri != null) rememberVideo(uri)
                 val msg = if (uri == null) getString(R.string.save_failed)
                 else if (log != null) getString(R.string.saved_with_log) else getString(R.string.saved, "Movies/OpenTrack")
                 Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
@@ -705,7 +769,7 @@ class MainActivity : AppCompatActivity() {
         val line = t.line("set").i("shutterNs", settings.shutterNs).n("ev", settings.evThirds / 3.0, 2).b("focusInf", settings.focusInfinity)
             .n("cameraZoom", settings.zoomRatio.toDouble(), 2).b("ois", settings.ois).s("stab", stabPreset.name).b("horizon", horizonLock)
             .b("autoZoom", zoomConfig.auto).n("zoomMin", zoomConfig.minZoom, 2).n("zoomMax", zoomConfig.maxZoom, 2).n("cropZoom", cropZoom, 2)
-            .s("detector", detectorMode.name).s("target", targetClasses.name).b("autoLock", autoLock).s("view", previewMode.name)
+            .s("detector", detectorMode.name).s("target", targetClasses.name).b("autoLock", autoLock).s("view", previewMode.name).s("codec", codec.name).i("outLong", outputLongSide)
         // Only when something changed (the line without its timestamp is the comparison key).
         val key = line.toString()
         if (key == lastLoggedSettings) return
@@ -738,6 +802,8 @@ class MainActivity : AppCompatActivity() {
     private fun refreshButtons() {
         logSettings()
         findViewById<Button>(R.id.lens).text = lensLabel()
+        findViewById<Button>(R.id.codec).text = getString(R.string.codec, codecName(codec))
+        findViewById<Button>(R.id.share).visibility = if (lastVideo != null) android.view.View.VISIBLE else android.view.View.GONE
         findViewById<Button>(R.id.ois).apply {
             visibility = if (profile?.hasOis == true) android.view.View.VISIBLE else android.view.View.GONE
             setText(if (settings.ois) R.string.ois_on else R.string.ois_off)
@@ -788,6 +854,8 @@ class MainActivity : AppCompatActivity() {
         const val PREF_DETECTOR = "detectorMode"
         const val PREF_TARGET = "targetClasses"
         const val PREF_LENS = "lens"
+        const val PREF_CODEC = "codec"
+        const val PREF_LAST_VIDEO = "lastVideo"
         const val PREF_OIS = "ois"
         const val PREF_OUTPUT = "outputLongSide"
         const val PREF_TELEMETRY = "telemetry"

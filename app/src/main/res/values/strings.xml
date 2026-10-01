@@ -68,4 +68,13 @@
     <string name="output_res">Output: %s</string>
     <string name="ois_on">OIS: on</string>
     <string name="ois_off">OIS: off</string>
+    <string name="codec">Codec: %s</string>
+    <string name="codec_avc">H.264</string>
+    <string name="codec_hevc">HEVC</string>
+    <string name="codec_hevc10">HEVC 10-bit</string>
+    <string name="codec_unsupported">%s is not supported at this size and frame rate; the recording will fall back.</string>
+    <string name="codec_fallback">%1$s not available, recorded as %2$s.</string>
+    <string name="codec_no_10bit_gl">No 10-bit GPU output on this phone: 10-bit HEVC from 8-bit frames (smoother sky gradients only from the encoder).</string>
+    <string name="share">Share</string>
+    <string name="share_missing">The last video is no longer there.</string>
 </resources>

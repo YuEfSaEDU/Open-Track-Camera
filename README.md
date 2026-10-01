@@ -66,7 +66,11 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   uygulamasına açtığı 4K60) seçilir; takip, ileriye bakan stabilizasyon ve otomatik zoom aynı şekilde
   uygulanır, 1080p sonuç ve orijinal ses `Movies/OpenTrack` klasörüne yazılır. Kamera hareketi
   görüntüden kestirilir (kayıtlı videoda jiroskop yok).
-- **Kayıt**: donanım H.264 (isteğe bağlı HEVC) + AAC ses, `Movies/OpenTrack` klasörüne. **Çıkış:
+- **Kayıt**: donanım kodlayıcı + AAC ses, `Movies/OpenTrack` klasörüne. **Codec: H.264 / HEVC /
+  HEVC 10-bit** (10-bit: GPU çıkışı RGBA 1010102, kodlayıcı Main10; gökyüzü geçişlerinde bantlanma
+  azalır; kamera akışı 8-bit SDR kalır). Telefon seçileni o boyutta kodlayamıyorsa HEVC'ye, o da
+  olmazsa H.264'e düşer ve bunu söyler. **Paylaş** düğmesi son kaydı Android paylaşım menüsüyle
+  (Instagram, WhatsApp… galeriden yükleme gibi) gönderir. **Çıkış:
   1080p (40 Mbps) veya 1440p (60 Mbps)**: 1440p, kırpma 2560 pikselden genişken (4K'da ≤1.5x zum)
   kaynağın gerçek detayını tutar; YouTube 1440p yüklemeye de daha iyi sıkıştırma verir.
 - **Büyütme kalitesi**: kırpma bikübik (Catmull-Rom) ölçeklenir, küçültürken 2x2 örnekle (titreşmez),

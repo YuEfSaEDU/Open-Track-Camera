@@ -20,25 +20,26 @@ class VideoEncoder(
     val height: Int,
     fps: Int,
     bitrate: Int,
-    mime: String,
+    val codec: VideoCodec,
     private val sink: MuxerSink,
     private val ptsOffsetNs: Long,
 ) {
     private val thread = HandlerThread("video-encoder").apply { start() }
-    private val codec = MediaCodec.createEncoderByType(mime)
+    private val encoder = MediaCodec.createEncoderByType(codec.mime)
     private val done = CountDownLatch(1)
     val inputSurface: Surface
 
     init {
-        val format = MediaFormat.createVideoFormat(mime, width, height).apply {
+        val format = MediaFormat.createVideoFormat(codec.mime, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            codec.configure(this)
         }
-        codec.setCallback(object : MediaCodec.Callback() {
+        encoder.setCallback(object : MediaCodec.Callback() {
             override fun onInputBufferAvailable(codec: MediaCodec, index: Int) = Unit
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
@@ -58,21 +59,21 @@ class VideoEncoder(
                 done.countDown()
             }
         }, Handler(thread.looper))
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        inputSurface = codec.createInputSurface()
-        codec.start()
+        encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        inputSurface = encoder.createInputSurface()
+        encoder.start()
     }
 
     /** Call after the GL pipeline stopped drawing into [inputSurface]. Blocks until drained. */
     fun stop() {
         try {
-            codec.signalEndOfInputStream()
+            encoder.signalEndOfInputStream()
             if (!done.await(3, TimeUnit.SECONDS)) Log.w(TAG, "timed out waiting for end of stream")
-            codec.stop()
+            encoder.stop()
         } catch (e: Exception) {
             Log.e(TAG, "stop failed", e)
         } finally {
-            codec.release()
+            encoder.release()
             inputSurface.release()
             thread.quitSafely()
         }

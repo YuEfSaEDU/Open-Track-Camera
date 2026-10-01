@@ -6,6 +6,7 @@ import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import com.opentrack.camera.record.VideoCodec
 import com.opentrack.camera.record.bitrateFor
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -71,6 +72,8 @@ class VideoProcessor(
     private val skyEnabled: Boolean,
     /** Long side of the output for 1440p+ sources: 1920 (1080p) or 2560 (1440p). */
     private val outputLongSide: Int,
+    /** Preferred codec (falls back if the phone cannot encode it at the output size). */
+    private val codecChoice: VideoCodec,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -135,7 +138,8 @@ class VideoProcessor(
         val (outW, outH) = if (srcW >= srcH) long to short else short to long
 
         // --- GL ---
-        val egl = EglCore()
+        val codec = VideoCodec.pick(codecChoice, outW, outH, fps)
+        val egl = EglCore(codec.tenBit)
         val pbuffer = egl.createPbuffer()
         egl.makeCurrent(pbuffer)
         val renderer = FrameRenderer().also { it.displayRotationQuarterTurns = quarter }
@@ -186,7 +190,7 @@ class VideoProcessor(
         val audioFormat = audioIndex?.let { extractor.getTrackFormat(it) }
         val sink = MuxerSink(pfd.fileDescriptor, audioFormat != null)
         audioFormat?.let { sink.addAudioTrack(it) }
-        val encoder = VideoEncoder(outW, outH, fps, bitrateFor(long), MediaFormat.MIMETYPE_VIDEO_AVC, sink, 0L)
+        val encoder = VideoEncoder(outW, outH, fps, bitrateFor(long), codec, sink, 0L)
         val encSurface: EGLSurface = egl.createWindowSurface(encoder.inputSurface)
 
         // Track log next to the video (Download/OpenTrack), in the bench's CSV layout, so a
