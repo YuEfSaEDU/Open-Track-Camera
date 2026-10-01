@@ -62,6 +62,11 @@ object CameraReport {
         appendLine("  AE fps aralıkları: ${c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.joinToString()}")
         val ois = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
         val oisData = c.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES)?.contains(CameraMetadata.STATISTICS_OIS_DATA_MODE_ON) == true
+        val dist = c.get(CameraCharacteristics.DISTORTION_CORRECTION_AVAILABLE_MODES)?.joinToString {
+            when (it) { CameraMetadata.DISTORTION_CORRECTION_MODE_OFF -> "OFF"; CameraMetadata.DISTORTION_CORRECTION_MODE_FAST -> "FAST"; CameraMetadata.DISTORTION_CORRECTION_MODE_HIGH_QUALITY -> "HQ"; else -> "$it" }
+        }
+        appendLine("  distorsiyon düzeltme: ${dist ?: "yok"}, katsayılar: ${c.get(CameraCharacteristics.LENS_DISTORTION)?.joinToString { "%.4f".format(it) } ?: "-"}, " +
+            "iç parametreler: ${c.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)?.joinToString { "%.1f".format(it) } ?: "-"}")
         appendLine("  OIS: ${if (ois) "var" else "yok"}, OIS kayması verisi: ${if (oisData) "var" else "yok"}, zaman damgası: " +
             if (c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) == CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) "realtime" else "bilinmiyor")
         val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return

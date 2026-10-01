@@ -330,6 +330,7 @@ class CameraController(
                     .n("focus", (result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: -1f).toDouble(), 2)
                     .i("skew", skew)
                     .i("ois", result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE) ?: -1)
+                    .i("dist", result.get(CaptureResult.DISTORTION_CORRECTION_MODE) ?: -1)
                 // Which physical lens a multi-camera actually streams from (it may switch with zoom).
                 result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { line.s("phys", it) }
                 line.send()
