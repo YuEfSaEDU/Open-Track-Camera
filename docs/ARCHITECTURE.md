@@ -221,6 +221,17 @@ ve zum yanlış hedefe gidiyordu.
   Hedef bir karede sıçrarsa (başka bir nesneye geçiş, ya da takibin yeniden tohumlanıp kayması) süzülme baştan başlar. Testler: tek karedeki en
   büyük kayma, anında kilide göre yarıdan az.
 
+### Hedef türü ve dedektör modu
+
+- **Hedef** düğmesi: *hava araçları* (COCO `airplane`; helikopterler genelde bu sınıfta çıkar) veya
+  *tüm araçlar* (+ araba, kamyon, otobüs, motosiklet, tren, tekne). Sinir ağı yalnızca seçilen
+  sınıflarla kurulur; hava aracı modunda başka bir sınıfın kutusu bir uçak kutusunu bastıramaz.
+- **Dedektör** düğmesi: hibrit (varsayılan) / sinir ağı / gökyüzü. Sadece sinir ağı ölçüldü
+  (bağımsız referansla): SOLOTÜRK'te hedefte 0.85 → 0.64, kaçırılan 0.05 → 0.30 (uzak F-16'lar
+  sinir ağına birkaç piksel); yanlış hedef 0.10 → 0.07. Eski sette hedefte 0.82 → 0.78, yanlış
+  0.16 → 0.10. Kayıp kazançtan büyük olduğu için varsayılan hibrit kaldı; gökyüzü lekeleri zaten
+  yalnızca kilit adayıdır, kadraj ve zum sinir ağı onayıyla hedefe döner.
+
 ### Gökyüzü dedektörü (`SkyBlobDetector`)
 
 Uzaktaki bir uçak 4K karede birkaç piksel olabilir; 640x360'a (ve modelin 320x320 girişine)
