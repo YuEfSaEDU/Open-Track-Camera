@@ -386,8 +386,9 @@ class MainActivity : AppCompatActivity() {
     private fun cycleResolution() {
         if (recorder?.isRecording == true) return
         val manager = getSystemService(CameraManager::class.java)
-        val labels = CameraProfile.available(manager, lens).map { it.label }.toMutableList()
-        if (CameraProfile.available(manager, lens).none { it.sourceSize.width >= 3840 && it.fps == 60 }) labels += FORCED_4K60
+        val profiles = CameraProfile.available(manager, lens)
+        val labels = profiles.map { it.label }.toMutableList()
+        if (profiles.none { it.sourceSize.width >= 3456 && it.fps == 60 }) labels += FORCED_4K60
         val current = profile?.label
         val next = labels[(labels.indexOf(current) + 1) % labels.size]
         prefs.edit {
@@ -420,6 +421,10 @@ class MainActivity : AppCompatActivity() {
     /** Button text for the current lens. */
     private fun lensLabel(): String {
         val l = lens ?: return getString(R.string.lens, getString(R.string.lens_main), 1.0, "")
+        if (l.multi) {
+            val r = l.zoomRange
+            return getString(R.string.lens_multi, r?.lower ?: 1f, r?.upper ?: 1f, if (l.listed) "" else getString(R.string.lens_hidden))
+        }
         val kind = when {
             l.zoomFactor < 0.85 -> R.string.lens_wide
             l.zoomFactor > 1.3 -> R.string.lens_tele
@@ -745,7 +750,7 @@ class MainActivity : AppCompatActivity() {
         val hasVendorKeys = runCatching { profile?.let { VendorKeys.isAvailable(manager.getCameraCharacteristics(it.cameraId)) } ?: false }.getOrDefault(false)
         vendor.visibility = if (hasVendorKeys) android.view.View.VISIBLE else android.view.View.GONE
         vendor.setText(if (prefs.getBoolean(PREF_VENDOR, false)) R.string.vendor_unlock_on else R.string.vendor_unlock_off)
-        findViewById<Button>(R.id.resolution).text = getString(R.string.resolution, profile?.label?.replace("3840x2160", "4K")?.replace("4096x2304", "4K 4096")?.replace("2560x1440", "1440p")?.replace("1920x1080", "1080p") ?: "-")
+        findViewById<Button>(R.id.resolution).text = getString(R.string.resolution, profile?.label?.replace("3840x2160", "4K")?.replace("4096x2304", "4K 4096")?.replace("3648x2048", "4K 3648")?.replace("2560x1440", "1440p")?.replace("1920x1080", "1080p") ?: "-")
         findViewById<Button>(R.id.stabilizer).setText(stabPreset.label)
         findViewById<Button>(R.id.horizon).setText(if (horizonLock) R.string.horizon_on else R.string.horizon_off)
     }

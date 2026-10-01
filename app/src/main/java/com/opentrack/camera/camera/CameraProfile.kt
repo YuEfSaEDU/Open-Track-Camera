@@ -7,6 +7,7 @@ import android.hardware.camera2.CameraMetadata
 import android.os.Build
 import android.util.Range
 import android.util.Size
+import kotlin.math.abs
 
 /** Everything the pipeline needs to know about the chosen camera + stream configuration. */
 data class CameraProfile(
@@ -62,6 +63,12 @@ data class CameraProfile(
         val zoomFactor: Double,
         /** Listed by the phone (or reached through a listed logical camera). */
         val listed: Boolean,
+        /**
+         * A logical multi-camera: switches between its physical lenses with the zoom ratio
+         * (the camera zoom slider), like the phone's own camera app.
+         */
+        val multi: Boolean = false,
+        val zoomRange: Range<Float>? = null,
     ) {
         val key: String get() = key(cameraId, physicalId)
 
@@ -89,7 +96,7 @@ data class CameraProfile(
          */
         fun select(manager: CameraManager, preferred: String? = null, force4k60: Boolean = false, lens: Lens? = null): CameraProfile? {
             val all = available(manager, lens)
-            if (force4k60 && all.none { it.sourceSize.width >= FOUR_K.width && it.fps == 60 }) {
+            if (force4k60 && all.none { it.sourceSize.width >= FOUR_K.width * 9 / 10 && it.fps == 60 }) {
                 if (lens != null) {
                     characteristics(manager, lens)?.let { c -> build(lens.cameraId, c, FOUR_K, 60, force = true)?.copy(physicalCameraId = lens.physicalId) }?.let { return it }
                 } else {
@@ -112,7 +119,9 @@ data class CameraProfile(
                 if (c.get(CameraCharacteristics.LENS_FACING) != CameraMetadata.LENS_FACING_BACK) return
                 val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return
                 val width = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width?.takeIf { it > 0 } ?: return
-                found += Lens(cameraId, physicalId, focal, 1.0, listed) to (focal / width).toDouble()
+                val multi = physicalId == null &&
+                    c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA) == true
+                found += Lens(cameraId, physicalId, focal, 1.0, listed, multi, c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)) to (focal / width).toDouble()
             }
             val probe = listedIds + (0..9).map { it.toString() }.filter { it !in listedIds }
             for (id in probe) {
@@ -202,12 +211,15 @@ data class CameraProfile(
         }
 
         /**
-         * [wanted], or failing that the smallest 16:9 size up to 10% wider (some lenses list
-         * 4096x2304 but not 3840x2160; the pipeline works with any 16:9 source).
+         * [wanted], or failing that the (about) 16:9 size closest to its width, within 10%:
+         * lenses list other "4K" sizes (the main camera 4096x2304; the Honor 200 Pro's telephoto
+         * only 3648x2048). The pipeline works with any such source.
          */
         private fun pickSize(sizes: Array<Size>, wanted: Size): Size? =
             sizes.firstOrNull { it == wanted }
-                ?: sizes.filter { it.width * 9 == it.height * 16 && it.width >= wanted.width && it.width <= wanted.width * 11 / 10 }.minByOrNull { it.width }
+                ?: sizes.filter { s ->
+                    abs(s.width.toDouble() / s.height - 16.0 / 9) < 0.01 && abs(s.width - wanted.width) <= wanted.width / 10
+                }.minByOrNull { abs(it.width - wanted.width) }
 
         private fun build(id: String, c: CameraCharacteristics, wanted: Size, fps: Int, force: Boolean = false): CameraProfile? {
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null

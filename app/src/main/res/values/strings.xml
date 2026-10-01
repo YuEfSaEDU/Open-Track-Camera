@@ -64,4 +64,5 @@
     <string name="telemetry_off">Log: off</string>
     <string name="saved_with_log">Saved: Movies/OpenTrack, log in Download/OpenTrack</string>
     <string name="shutter_smart">Shutter: smart</string>
+    <string name="lens_multi">Lens: multi %1$.1f–%2$.0fx%3$s</string>
 </resources>
