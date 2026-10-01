@@ -20,6 +20,7 @@ import com.opentrack.tracking.ShutterPriorityExposure
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 
 /**
  * Camera2 wrapper with a single output (the render pipeline's SurfaceTexture). All camera
@@ -192,18 +193,42 @@ class CameraController(
     private fun wantsShutterPriority(s: CameraSettings) = s.shutterNs > 0 && profile.supportsManualSensor
 
     /**
-     * Mean luma of the latest analysis frame (~10 Hz). Teaches the auto exposure brightness,
-     * or drives ISO in shutter priority.
+     * Mean luma of an analysis frame (~10 Hz) taken at [timestampNs]. Teaches the auto
+     * exposure brightness, or drives ISO / exposure time in shutter priority, judged against
+     * the settings that frame was actually taken with.
      */
-    fun onSceneLuma(mean: Double) = handler.post {
+    fun onSceneLuma(mean: Double, timestampNs: Long) = handler.post {
         val e = ae ?: return@post
         if (manualActive) {
-            if (e.update(mean)) applySettings(settings)
+            val shot = shotSettings(timestampNs) ?: return@post
+            if (e.update(mean, shot.second, shot.first)) applySettings(settings)
         } else {
             e.observeAuto(mean)
             // Shutter priority was requested before auto exposure had settled: switch now.
             if (wantsShutterPriority(settings) && !profile.highSpeed && lastAutoExposureNs > 0) applySettings(settings)
         }
+    }
+
+    // Exposure time and ISO of recent frames by sensor timestamp (capture results arrive on the
+    // camera executor; read on the camera handler).
+    private val shotTs = LongArray(SHOT_HISTORY)
+    private val shotExposure = LongArray(SHOT_HISTORY)
+    private val shotIso = IntArray(SHOT_HISTORY)
+    private var shotNext = 0
+    private val shotLock = Any()
+
+    private fun shotSettings(timestampNs: Long): Pair<Long, Int>? = synchronized(shotLock) {
+        // The frame itself, or failing that the closest one within 20 ms; if the clocks do not
+        // match at all, the latest result (a few frames off, still far better than nothing).
+        var best = -1
+        var bestDt = 20_000_000L
+        for (k in 0 until SHOT_HISTORY) {
+            if (shotExposure[k] <= 0) continue
+            val dt = abs(shotTs[k] - timestampNs)
+            if (dt <= bestDt) { bestDt = dt; best = k }
+        }
+        if (best < 0) best = (shotNext - 1 + SHOT_HISTORY) % SHOT_HISTORY
+        if (shotExposure[best] <= 0 || shotIso[best] <= 0) null else shotExposure[best] to shotIso[best]
     }
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -213,6 +238,12 @@ class CameraController(
             val skew = result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW) ?: 0L
             lastExposureNs = exposure
             lastIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: lastIso
+            synchronized(shotLock) {
+                shotTs[shotNext] = ts
+                shotExposure[shotNext] = exposure
+                shotIso[shotNext] = lastIso
+                shotNext = (shotNext + 1) % SHOT_HISTORY
+            }
             if (result.get(CaptureResult.CONTROL_AE_MODE) != CameraMetadata.CONTROL_AE_MODE_OFF) {
                 lastAutoExposureNs = exposure
                 lastAutoIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: lastAutoIso
@@ -237,5 +268,8 @@ class CameraController(
 
     private companion object {
         const val TAG = "CameraController"
+
+        /** Capture results remembered for matching analysis frames (~0.5 s at 60 fps). */
+        const val SHOT_HISTORY = 32
     }
 }

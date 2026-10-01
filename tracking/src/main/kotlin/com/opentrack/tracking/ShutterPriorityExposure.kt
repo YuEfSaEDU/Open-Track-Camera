@@ -13,17 +13,19 @@ import kotlin.math.ln
  * the analysis frames. While the camera's auto exposure runs, [observeAuto] learns the
  * brightness it aims for; in shutter priority, [update] moves the total exposure (ISO × time)
  * towards that brightness in damped, rate-limited steps (no flicker, no pumping on a passing
- * cloud). ISO moves first; the chosen shutter time is a ceiling: only when ISO is already at
+ * cloud). Each measurement is judged against the ISO and time that frame was actually taken
+ * with, so the camera's settings latency (several frames) cannot make the loop overshoot or
+ * oscillate: the required exposure is computed, not integrated from stale errors. ISO moves first; the chosen shutter time is a ceiling: only when ISO is already at
  * its minimum and the scene is still too bright (bright sun at 1/500 s) does the exposure time
  * get shorter, and it returns to the chosen time before ISO rises again. Pure logic, no Android.
  */
 class ShutterPriorityExposure(
     private val isoMin: Int,
     private val isoMax: Int,
-    /** Fraction of the remaining (log) error corrected per update (updates at ~10 Hz). */
-    private val gain: Double = 0.35,
-    /** Largest ISO change per update, as a factor. */
-    private val maxStep: Double = 1.25,
+    /** Fraction of the remaining (log) exposure error corrected per update (updates at ~10 Hz). */
+    private val gain: Double = 0.5,
+    /** Largest exposure change per update, as a factor. */
+    private val maxStep: Double = 1.4,
     /** Errors smaller than this (fraction of the target) are ignored. */
     private val deadband: Double = 0.04,
     /** Shortest exposure time the sensor supports (ns). */
@@ -57,19 +59,24 @@ class ShutterPriorityExposure(
     }
 
     /**
-     * New measurement in shutter priority. Returns true when ISO or exposure time changed
-     * enough to be worth a new capture request.
+     * New measurement in shutter priority: [meanLuma] of a frame taken at [frameIso] and
+     * [frameExposureNs]. Returns true when ISO or exposure time changed enough to be worth a
+     * new capture request.
      */
-    fun update(meanLuma: Double): Boolean {
+    fun update(meanLuma: Double, frameIso: Int, frameExposureNs: Long): Boolean {
         val target = targetLuma ?: return false
-        if (meanLuma <= 1.0 || maxExposureNs <= 0) return false
-        val ratio = target / meanLuma
-        if (abs(ratio - 1) < deadband) return false
+        if (maxExposureNs <= 0 || frameIso <= 0 || frameExposureNs <= 0) return false
+        // A black (or white) frame still says which way to go: clamp instead of ignoring it.
+        val ratio = target / meanLuma.coerceIn(2.0, 253.0)
         // Luma is gamma encoded (~2.2): the light ratio is the luma ratio to that power.
-        val logStep = (gain * 2.2 * ln(ratio)).coerceIn(-ln(maxStep), ln(maxStep))
+        val needed = frameIso.toDouble() * frameExposureNs * Math.pow(ratio, 2.2)
+        val current = iso.toDouble() * exposureNs
+        val error = ln(needed / current)
+        if (abs(ratio - 1) < deadband && abs(error) < 2.2 * deadband) return false
+        val logStep = (gain * error).coerceIn(-ln(maxStep), ln(maxStep))
         val oldIso = iso
         val oldExposure = exposureNs
-        allocate(iso.toDouble() * exposureNs * exp(logStep))
+        allocate(current * exp(logStep))
         return iso != oldIso || abs(exposureNs - oldExposure) > oldExposure * 0.01
     }
 

@@ -267,7 +267,7 @@ class MainActivity : AppCompatActivity() {
         val analysisH = ((analysisW.toDouble() * srcH / srcW) / 2).roundToInt() * 2
         val engine = AnalysisEngine(tracker, detector, visual, motion, analysisW, analysisH, srcW.toDouble() / analysisW).also {
             it.mode = detectorMode
-            it.onSceneLuma = { luma -> camera?.onSceneLuma(luma) }
+            it.onSceneLuma = { luma, ts -> camera?.onSceneLuma(luma, ts) }
         }
         analysis = engine
 

@@ -27,8 +27,8 @@ class ShutterPriorityExposureTest {
         // The light halves (a cloud): ISO follows within a couple of seconds at 10 Hz, without overshoot.
         var maxIso = 0
         repeat(30) {
-            l = luma(light / 2, 1_000_000, ae.iso)
-            ae.update(l)
+            l = luma(light / 2, ae.exposureNs, ae.iso)
+            ae.update(l, ae.iso, ae.exposureNs)
             maxIso = maxOf(maxIso, ae.iso)
         }
         assertTrue("brightness ${luma(light / 2, 1_000_000, ae.iso)} vs $target", abs(luma(light / 2, 1_000_000, ae.iso) - target) < target * 0.05)
@@ -41,9 +41,9 @@ class ShutterPriorityExposureTest {
         repeat(10) { ae.observeAuto(120.0) }
         ae.start(800, 10_000_000, 1_000_000) // would need ISO 8000: clamped
         assertEquals(3200, ae.iso)
-        assertFalse(ae.update(118.0)) // inside the dead band
+        assertFalse(ae.update(118.0, ae.iso, ae.exposureNs)) // inside the dead band
         // Far too dark at max ISO: stays at max, never above.
-        repeat(5) { ae.update(30.0) }
+        repeat(5) { ae.update(30.0, ae.iso, ae.exposureNs) }
         assertEquals(3200, ae.iso)
     }
 
@@ -62,16 +62,63 @@ class ShutterPriorityExposureTest {
         // A cloud: 10x less light. The time goes back to 1/500 s first (never longer), then ISO rises.
         var maxExposure = 0L
         repeat(40) {
-            ae.update(luma(light / 10, ae.exposureNs, ae.iso))
+            ae.update(luma(light / 10, ae.exposureNs, ae.iso), ae.iso, ae.exposureNs)
             maxExposure = maxOf(maxExposure, ae.exposureNs)
         }
         assertEquals(2_000_000L, ae.exposureNs)
-        assertEquals(125.0, ae.iso.toDouble(), 8.0)
+        assertEquals(125.0, ae.iso.toDouble(), 12.0) // within the dead band
         assertTrue(maxExposure <= 2_000_000L)
         assertTrue(abs(luma(light / 10, ae.exposureNs, ae.iso) - target) < target * 0.05)
         // Darker still: now ISO goes up, the time stays at 1/500 s.
-        repeat(40) { ae.update(luma(light / 32, ae.exposureNs, ae.iso)) }
+        repeat(40) { ae.update(luma(light / 32, ae.exposureNs, ae.iso), ae.iso, ae.exposureNs) }
         assertEquals(2_000_000L, ae.exposureNs)
         assertEquals(400.0, ae.iso.toDouble(), 40.0) // within the dead band (±4% luma ≈ ±9% light)
+    }
+
+    /** Camera whose settings take effect [latency] measurements late (request queue + analysis). */
+    private fun runWithLatency(ae: ShutterPriorityExposure, light: (Int) -> Double, steps: Int, latency: Int): List<Pair<Long, Int>> {
+        val applied = ArrayDeque<Pair<Long, Int>>()
+        repeat(latency) { applied.addLast(ae.exposureNs to ae.iso) }
+        val history = ArrayList<Pair<Long, Int>>()
+        for (k in 0 until steps) {
+            val (e, i) = applied.removeFirst() // what this frame was really shot with
+            ae.update(luma(light(k), e, i), i, e)
+            applied.addLast(ae.exposureNs to ae.iso)
+            history += ae.exposureNs to ae.iso
+        }
+        return history
+    }
+
+    @Test
+    fun settingsLatencyCausesNoOvershootOrRunaway() {
+        // Bright sun, then a sudden 30x drop, with the camera applying settings 3 updates late.
+        val ae = ShutterPriorityExposure(100, 6400, minExposureNs = 10_000)
+        repeat(30) { ae.observeAuto(luma(30.0, 250_000, 100)) }
+        val target = ae.targetLuma!!
+        ae.start(100, 250_000, 2_000_000)
+        val hist = runWithLatency(ae, { k -> if (k < 40) 30.0 else 1.0 }, 120, latency = 3)
+        // Bright phase: settles at ~1/4000 s, never runs away to the shortest exposure.
+        val bright = hist.subList(0, 40)
+        assertTrue("ran away to ${bright.minOf { it.first }} ns", bright.minOf { it.first } > 200_000)
+        // Dark phase: back to 1/500 s and ISO ~750, without overshooting by more than 15%.
+        val (e, i) = hist.last()
+        assertEquals(2_000_000L, e)
+        assertEquals(target, luma(1.0, e, i), target * 0.06)
+        val peakIso = hist.subList(40, hist.size).maxOf { it.second }
+        assertTrue("overshoot: peak ISO $peakIso vs final $i", peakIso <= i * 1.15)
+    }
+
+    @Test
+    fun recoversFromABlackFrame() {
+        // The reported failure: stuck at 1/8962 s ISO 100 on a black image indoors.
+        val ae = ShutterPriorityExposure(100, 6400, minExposureNs = 100_000)
+        repeat(30) { ae.observeAuto(110.0) }
+        ae.start(100, 100_000, 2_000_000) // starts at 1/10000 s
+        val indoor = 0.05
+        assertTrue(luma(indoor, ae.exposureNs, ae.iso) < 10)
+        val hist = runWithLatency(ae, { indoor }, 60, latency = 3)
+        val (e, i) = hist.last()
+        assertEquals(2_000_000L, e)
+        assertEquals(110.0, luma(indoor, e, i), 110.0 * 0.06)
     }
 }
