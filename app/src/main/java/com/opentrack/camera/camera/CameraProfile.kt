@@ -89,7 +89,7 @@ data class CameraProfile(
          */
         fun select(manager: CameraManager, preferred: String? = null, force4k60: Boolean = false, lens: Lens? = null): CameraProfile? {
             val all = available(manager, lens)
-            if (force4k60 && all.none { it.sourceSize == FOUR_K && it.fps == 60 }) {
+            if (force4k60 && all.none { it.sourceSize.width >= FOUR_K.width && it.fps == 60 }) {
                 if (lens != null) {
                     characteristics(manager, lens)?.let { c -> build(lens.cameraId, c, FOUR_K, 60, force = true)?.copy(physicalCameraId = lens.physicalId) }?.let { return it }
                 } else {
@@ -201,10 +201,18 @@ data class CameraProfile(
             return build(id, c, size, fps, force = true)?.copy(fpsRange = range, forced = false, highSpeed = true, captureFps = range.upper)
         }
 
-        private fun build(id: String, c: CameraCharacteristics, size: Size, fps: Int, force: Boolean = false): CameraProfile? {
+        /**
+         * [wanted], or failing that the smallest 16:9 size up to 10% wider (some lenses list
+         * 4096x2304 but not 3840x2160; the pipeline works with any 16:9 source).
+         */
+        private fun pickSize(sizes: Array<Size>, wanted: Size): Size? =
+            sizes.firstOrNull { it == wanted }
+                ?: sizes.filter { it.width * 9 == it.height * 16 && it.width >= wanted.width && it.width <= wanted.width * 11 / 10 }.minByOrNull { it.width }
+
+        private fun build(id: String, c: CameraCharacteristics, wanted: Size, fps: Int, force: Boolean = false): CameraProfile? {
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
             val sizes = map.getOutputSizes(SurfaceTexture::class.java) ?: return null
-            if (sizes.none { it == size }) return null
+            val size = pickSize(sizes, wanted) ?: return null
             val minFrameNs = map.getOutputMinFrameDuration(SurfaceTexture::class.java, size)
             if (!force && minFrameNs > 1_000_000_000L / fps + 200_000L) return null
             val ranges = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null

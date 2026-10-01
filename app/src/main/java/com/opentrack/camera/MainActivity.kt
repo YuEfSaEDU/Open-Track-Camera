@@ -387,7 +387,7 @@ class MainActivity : AppCompatActivity() {
         if (recorder?.isRecording == true) return
         val manager = getSystemService(CameraManager::class.java)
         val labels = CameraProfile.available(manager, lens).map { it.label }.toMutableList()
-        if (labels.none { it.startsWith("3840x2160@60") }) labels += FORCED_4K60
+        if (CameraProfile.available(manager, lens).none { it.sourceSize.width >= 3840 && it.fps == 60 }) labels += FORCED_4K60
         val current = profile?.label
         val next = labels[(labels.indexOf(current) + 1) % labels.size]
         prefs.edit {
@@ -745,7 +745,7 @@ class MainActivity : AppCompatActivity() {
         val hasVendorKeys = runCatching { profile?.let { VendorKeys.isAvailable(manager.getCameraCharacteristics(it.cameraId)) } ?: false }.getOrDefault(false)
         vendor.visibility = if (hasVendorKeys) android.view.View.VISIBLE else android.view.View.GONE
         vendor.setText(if (prefs.getBoolean(PREF_VENDOR, false)) R.string.vendor_unlock_on else R.string.vendor_unlock_off)
-        findViewById<Button>(R.id.resolution).text = getString(R.string.resolution, profile?.label?.replace("3840x2160", "4K")?.replace("2560x1440", "1440p")?.replace("1920x1080", "1080p") ?: "-")
+        findViewById<Button>(R.id.resolution).text = getString(R.string.resolution, profile?.label?.replace("3840x2160", "4K")?.replace("4096x2304", "4K 4096")?.replace("2560x1440", "1440p")?.replace("1920x1080", "1080p") ?: "-")
         findViewById<Button>(R.id.stabilizer).setText(stabPreset.label)
         findViewById<Button>(R.id.horizon).setText(if (horizonLock) R.string.horizon_on else R.string.horizon_off)
     }

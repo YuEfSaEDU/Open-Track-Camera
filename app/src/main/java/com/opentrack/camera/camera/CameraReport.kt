@@ -22,7 +22,9 @@ object CameraReport {
         appendLine("Arka lensler: ${runCatching { CameraProfile.lenses(manager).joinToString { l -> "${l.key} ${l.focalMm} mm %.2fx".format(l.zoomFactor) + if (l.listed) "" else " (listede yok)" } }.getOrElse { it.toString() }}")
         appendLine()
         val seen = LinkedHashSet<String>()
-        val queue = ArrayDeque(manager.cameraIdList.toList())
+        // The chosen camera first (the report may be cut off by the app it is shared to).
+        val queue = ArrayDeque(listOfNotNull(chosen?.physicalCameraId, chosen?.cameraId) + manager.cameraIdList.toList())
+        val lists = HashMap<String, String>()
         // Some phones only answer for ids they never list; probe the usual small numbers too.
         for (i in 0..9) if (i.toString() !in queue) queue += i.toString()
         while (queue.isNotEmpty()) {
@@ -31,7 +33,7 @@ object CameraReport {
             val c = runCatching { manager.getCameraCharacteristics(id) }.getOrNull() ?: continue
             val listed = id in manager.cameraIdList
             appendLine("== Kamera $id${if (listed) "" else " (listede yok)"}")
-            describe(c)
+            describe(c, id, lists)
             val physical = c.physicalCameraIds
             if (physical.isNotEmpty()) {
                 appendLine("  fiziksel kameralar: ${physical.joinToString()}")
@@ -41,7 +43,14 @@ object CameraReport {
         }
     }
 
-    private fun StringBuilder.describe(c: CameraCharacteristics) {
+    /** Long key lists are printed once; a camera with the same list refers to the first. */
+    private fun StringBuilder.keyList(title: String, keys: List<String>, id: String, lists: HashMap<String, String>) {
+        val text = keys.joinToString()
+        val first = lists.putIfAbsent("$title|$text", id)
+        appendLine("  $title (${keys.size}): " + if (first != null) "Kamera $first ile aynı" else text)
+    }
+
+    private fun StringBuilder.describe(c: CameraCharacteristics, id: String, lists: HashMap<String, String>) {
         val facing = when (c.get(CameraCharacteristics.LENS_FACING)) {
             CameraMetadata.LENS_FACING_BACK -> "arka"
             CameraMetadata.LENS_FACING_FRONT -> "ön"
@@ -59,7 +68,7 @@ object CameraReport {
             "zoom ${c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)}, sensör yönü ${c.get(CameraCharacteristics.SENSOR_ORIENTATION)}")
         appendLine("  yetenekler: ${c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.joinToString { capability(it) }}")
         appendLine("  AE fps aralıkları: ${c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.joinToString()}")
-        appendLine("  oturum anahtarları: ${c.availableSessionKeys.joinToString { it.name }}")
+        keyList("oturum anahtarları", c.availableSessionKeys.map { it.name }, id, lists)
         val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return
         for ((name, cls) in listOf("SurfaceTexture" to SurfaceTexture::class.java, "MediaRecorder" to MediaRecorder::class.java)) {
             val sizes = map.getOutputSizes(cls)?.filter { it.width >= 1920 }?.sortedByDescending { it.width * it.height } ?: continue
@@ -74,7 +83,7 @@ object CameraReport {
         }
         val vendor = (c.availableCaptureRequestKeys.map { it.name } + c.keys.map { it.name })
             .filterNot { it.startsWith("android.") }.distinct().sorted()
-        if (vendor.isNotEmpty()) appendLine("  üretici anahtarları (${vendor.size}): ${vendor.joinToString()}")
+        if (vendor.isNotEmpty()) keyList("üretici anahtarları", vendor, id, lists)
     }
 
     private fun capability(v: Int) = when (v) {

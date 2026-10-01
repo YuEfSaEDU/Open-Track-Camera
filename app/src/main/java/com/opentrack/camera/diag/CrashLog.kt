@@ -12,21 +12,32 @@ import java.io.File
  */
 object CrashLog {
     private const val FILE = "last_crash.txt"
+    /** Timestamp of the last process exit already reported (each is reported once). */
+    private const val SEEN_EXIT = "last_exit_seen.txt"
 
     fun install(context: Context) {
         val file = File(context.filesDir, FILE)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
+        val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull()
+        val built = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime }.getOrNull()?.let { java.util.Date(it) }
         Thread.setDefaultUncaughtExceptionHandler { thread, e ->
-            runCatching { file.writeText("Çökme (${thread.name}, ${java.util.Date()}):\n${e.stackTraceToString()}") }
+            runCatching { file.writeText("Çökme (${thread.name}, ${java.util.Date()}, sürüm $version kurulum $built):\n${e.stackTraceToString()}") }
             previous?.uncaughtException(thread, e)
         }
     }
 
-    /** Text about the last abnormal exit, or null when the app last ended normally. */
+    /**
+     * Text about the last abnormal exit, or null when the app last ended normally. Each crash is
+     * returned once (by the launch after it), so an old crash does not show up in every report.
+     */
     fun last(context: Context): String? {
         val parts = ArrayList<String>()
         val am = context.getSystemService(ActivityManager::class.java)
+        val seen = File(context.filesDir, SEEN_EXIT)
+        val seenTs = runCatching { seen.readText().trim().toLong() }.getOrDefault(0L)
         val exit = runCatching { am.getHistoricalProcessExitReasons(context.packageName, 0, 1).firstOrNull() }.getOrNull()
+            ?.takeIf { it.timestamp != seenTs }
+        exit?.let { e -> runCatching { seen.writeText(e.timestamp.toString()) } }
         if (exit != null && exit.reason in setOf(
                 ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE, ApplicationExitInfo.REASON_ANR,
                 ApplicationExitInfo.REASON_LOW_MEMORY, ApplicationExitInfo.REASON_INITIALIZATION_FAILURE,
@@ -51,7 +62,10 @@ object CrashLog {
             }
         }
         val file = File(context.filesDir, FILE)
-        if (file.exists()) parts += file.readText().take(6000)
+        if (file.exists()) {
+            parts += file.readText().take(6000)
+            file.delete()
+        }
         return parts.takeIf { it.isNotEmpty() }?.joinToString("\n")
     }
 
