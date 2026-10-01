@@ -37,7 +37,6 @@
     <string name="permission_needed">Camera permission is required.</string>
     <string name="saved">Saved: %s</string>
     <string name="save_failed">Recording failed</string>
-    <string name="no_neural">Neural detector unavailable, sky detector only</string>
     <string name="status">%1$s → %2$dx%3$d@%4$d · %5$.0f fps · analysis %6$.1f ms · NN %7$.0f ms · %8$s</string>
     <string name="resolution">Stream: %s</string>
     <string name="camera_report">Camera report</string>

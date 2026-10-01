@@ -6,7 +6,7 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.graphics.createBitmap
-import com.opentrack.camera.detect.AircraftDetector
+import com.opentrack.camera.detect.DetectorHost
 import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.Detection
 import com.opentrack.tracking.DetectionPlanner
@@ -32,7 +32,7 @@ import kotlin.math.roundToInt
  */
 class AnalysisEngine(
     private val tracker: TargetTracker,
-    private val neural: AircraftDetector?,
+    private val neural: DetectorHost?,
     /** Camera motion from the image, used when the device has no gyroscope (null otherwise). */
     private val visualMotion: VisualMotionEstimator?,
     /** The camera motion the tracker uses (gyro or [visualMotion]). */

@@ -16,7 +16,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import androidx.core.graphics.createBitmap
-import com.opentrack.camera.detect.AircraftDetector
+import com.opentrack.camera.detect.DetectorHost
 import com.opentrack.camera.gl.EglCore
 import com.opentrack.camera.gl.FrameRenderer
 import com.opentrack.camera.gl.ReadbackTarget
@@ -42,7 +42,6 @@ import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
@@ -61,7 +60,7 @@ class VideoProcessor(
     private val context: Context,
     private val input: Uri,
     /** Shared with the live pipeline (which is stopped while processing); not closed here. */
-    private val detector: AircraftDetector?,
+    private val detector: DetectorHost?,
     private val zoomConfig: ZoomConfig,
     /** Stabilizer settings for [fps] → [StabilizerConfig]. */
     private val stabilizer: (fps: Int) -> StabilizerConfig,
@@ -163,7 +162,6 @@ class VideoProcessor(
         val fullBitmap = createBitmap(analysisW, analysisH)
         val roiBitmap = createBitmap(ROI, ROI)
         val neuralEvery = maxOf(1, (fps / 10.0).roundToInt())
-        val detectorThread = Executors.newSingleThreadExecutor { Thread(it, "offline-detector") }
         val center = Vec2(srcW / 2.0, srcH / 2.0)
 
         // --- output ---
@@ -258,8 +256,8 @@ class VideoProcessor(
                         val bmp = if (region == null) fullBitmap else roiBitmap
                         bmp.copyPixelsFromBuffer(target.read())
                         val area = region ?: Box(srcW / 2.0, srcH / 2.0, srcW.toDouble(), srcH.toDouble())
-                        // On its own thread, as live: the GPU delegate must not touch this thread's EGL context.
-                        dets += detectorThread.submit<List<Detection>> { detector.detect(bmp, ts, area) }.get()
+                        // Runs on the detector's own thread: the GPU delegate must not touch this thread's EGL context.
+                        dets += detector.detect(bmp, ts, area)
                         runs += NeuralRun(ts, region, ROI)
                     }
                     val skyEvery = if (tracker.prediction.state == TrackState.TRACKING) 12 else 3
@@ -305,7 +303,6 @@ class VideoProcessor(
             } else {
                 resolver.delete(outUri, null, null)
             }
-            detectorThread.shutdown()
             ring.release()
             lumaTarget.release()
             rgbTarget.release()
