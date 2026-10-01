@@ -69,6 +69,8 @@ data class CameraProfile(
          */
         val multi: Boolean = false,
         val zoomRange: Range<Float>? = null,
+        /** The physical lenses of a [multi] camera. */
+        val physicalIds: Set<String> = emptySet(),
     ) {
         val key: String get() = key(cameraId, physicalId)
 
@@ -121,7 +123,8 @@ data class CameraProfile(
                 val width = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width?.takeIf { it > 0 } ?: return
                 val multi = physicalId == null &&
                     c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA) == true
-                found += Lens(cameraId, physicalId, focal, 1.0, listed, multi, c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)) to (focal / width).toDouble()
+                found += Lens(cameraId, physicalId, focal, 1.0, listed, multi, c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE),
+                    if (multi) c.physicalCameraIds else emptySet()) to (focal / width).toDouble()
             }
             val probe = listedIds + (0..9).map { it.toString() }.filter { it !in listedIds }
             for (id in probe) {
@@ -143,6 +146,9 @@ data class CameraProfile(
             val defaultKey = runCatching { available(manager).firstOrNull()?.lensKey }.getOrNull()
             val main = found.firstOrNull { it.first.key == defaultKey } ?: found.firstOrNull { it.first.listed } ?: found.first()
             val lenses = found.map { (l, f) -> l.copy(zoomFactor = f / main.second) }
+                // A multi-camera whose lenses another one also has (and more) adds nothing (the
+                // Honor 200 Pro has one over main + wide + tele and one over main + wide only).
+                .filterNot { l -> l.multi && found.any { (o, _) -> o.multi && o.key != l.key && o.physicalIds.containsAll(l.physicalIds) && o.physicalIds.size > l.physicalIds.size } }
             return listOf(lenses.first { it.key == main.first.key }) + lenses.filter { it.key != main.first.key }.sortedBy { it.zoomFactor }
         }
 
