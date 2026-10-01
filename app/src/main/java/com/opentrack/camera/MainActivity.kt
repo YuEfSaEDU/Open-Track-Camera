@@ -28,6 +28,7 @@ import com.opentrack.camera.camera.CameraReport
 import com.opentrack.camera.camera.CameraSettings
 import com.opentrack.camera.camera.VendorKeys
 import com.opentrack.camera.diag.CrashLog
+import com.opentrack.camera.diag.Telemetry
 import com.opentrack.camera.offline.VideoProcessor
 import com.opentrack.camera.detect.DetectorHost
 import com.opentrack.camera.detect.TargetClasses
@@ -59,6 +60,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recordButton: Button
 
     private var profile: CameraProfile? = null
+    /** The lens chosen with the lens button (null = the main lens, the phone's default choice). */
+    private var lens: CameraProfile.Lens? = null
+    /** The camera delivered at least one frame since it was opened (a failing lens never does). */
+    @Volatile private var framesSeen = false
+    /** Frame-by-frame log of the current recording (see [Telemetry]), when enabled. */
+    private var telemetry: Telemetry? = null
+    private var lastLoggedSettings: String? = null
     /**
      * One neural detector for the activity's lifetime, living on its own thread (see
      * [DetectorHost]) and shared by the live pipeline and gallery processing.
@@ -186,6 +194,11 @@ class MainActivity : AppCompatActivity() {
             refreshButtons()
         }
         findViewById<Button>(R.id.resolution).setOnClickListener { cycleResolution() }
+        findViewById<Button>(R.id.lens).setOnClickListener { cycleLens() }
+        findViewById<Button>(R.id.telemetry).setOnClickListener {
+            prefs.edit { putBoolean(PREF_TELEMETRY, !prefs.getBoolean(PREF_TELEMETRY, true)) }
+            refreshButtons()
+        }
         findViewById<Button>(R.id.cameraReport).setOnClickListener { shareCameraReport() }
         findViewById<Button>(R.id.processVideo).setOnClickListener {
             val running = processor
@@ -239,7 +252,10 @@ class MainActivity : AppCompatActivity() {
     private fun startPipeline() {
         if (pipeline != null || processor != null) return
         val manager = getSystemService(CameraManager::class.java)
-        val p = CameraProfile.select(manager, prefs.getString(PREF_PROFILE, null), prefs.getBoolean(PREF_FORCE_4K60, false)) ?: run {
+        lens = prefs.getString(PREF_LENS, null)?.let { key ->
+            CameraProfile.lenses(manager).drop(1).firstOrNull { it.key == key }
+        }
+        val p = CameraProfile.select(manager, prefs.getString(PREF_PROFILE, null), prefs.getBoolean(PREF_FORCE_4K60, false), lens) ?: run {
             Toast.makeText(this, R.string.no_camera, Toast.LENGTH_LONG).show()
             return
         }
@@ -313,20 +329,33 @@ class MainActivity : AppCompatActivity() {
     private fun openCamera(p: CameraProfile, surface: Surface, model: GyroMotionModel, clockOffsetNs: Long) {
         if (pipeline == null) return
         val cam = CameraController(getSystemService(CameraManager::class.java), p, vendorExperiment = prefs.getBoolean(PREF_VENDOR, false))
+        framesSeen = false
         cam.listener = object : CameraController.Listener {
             override fun onFrameMetadata(timestampNs: Long, exposureNs: Long, rollingShutterSkewNs: Long) {
+                framesSeen = true
                 // Compare against the gyro at the middle of the exposure of the middle row.
                 model.cameraToGyroOffsetNs = clockOffsetNs + rollingShutterSkewNs / 2 + exposureNs / 2
                 updateRollingShutter(p, rollingShutterSkewNs)
             }
 
             override fun onError(message: String) {
-                runOnUiThread { Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show() }
+                runOnUiThread {
+                    if (lens != null && !framesSeen && camera === cam) {
+                        // A lens the maker keeps for its own app: back to the main lens.
+                        Toast.makeText(this@MainActivity, getString(R.string.lens_failed, message), Toast.LENGTH_LONG).show()
+                        prefs.edit { remove(PREF_LENS) }
+                        stopPipeline()
+                        startPipeline()
+                        refreshButtons()
+                    } else {
+                        Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                    }
+                }
             }
         }
         cam.update(settings)
-        cam.open(surface)
         camera = cam
+        cam.open(surface)
     }
 
     /**
@@ -356,7 +385,7 @@ class MainActivity : AppCompatActivity() {
     private fun cycleResolution() {
         if (recorder?.isRecording == true) return
         val manager = getSystemService(CameraManager::class.java)
-        val labels = CameraProfile.available(manager).map { it.label }.toMutableList()
+        val labels = CameraProfile.available(manager, lens).map { it.label }.toMutableList()
         if (labels.none { it.startsWith("3840x2160@60") }) labels += FORCED_4K60
         val current = profile?.label
         val next = labels[(labels.indexOf(current) + 1) % labels.size]
@@ -368,6 +397,34 @@ class MainActivity : AppCompatActivity() {
         stopPipeline()
         startPipeline()
         refreshButtons()
+    }
+
+    /**
+     * Next back lens (main, then widest to longest). Lenses the phone does not list for other
+     * apps are offered too; when one does not open, [openCamera] falls back to the main lens.
+     */
+    private fun cycleLens() {
+        if (recorder?.isRecording == true) return
+        val all = CameraProfile.lenses(getSystemService(CameraManager::class.java))
+        if (all.size < 2) return
+        val current = all.indexOfFirst { it.key == (lens?.key ?: all.first().key) }
+        val next = all[(current + 1).mod(all.size)]
+        prefs.edit { if (next.key == all.first().key) remove(PREF_LENS) else putString(PREF_LENS, next.key) }
+        if (!next.listed) Toast.makeText(this, R.string.lens_hidden_hint, Toast.LENGTH_LONG).show()
+        stopPipeline()
+        startPipeline()
+        refreshButtons()
+    }
+
+    /** Button text for the current lens. */
+    private fun lensLabel(): String {
+        val l = lens ?: return getString(R.string.lens, getString(R.string.lens_main), 1.0, "")
+        val kind = when {
+            l.zoomFactor < 0.85 -> R.string.lens_wide
+            l.zoomFactor > 1.3 -> R.string.lens_tele
+            else -> R.string.lens_main
+        }
+        return getString(R.string.lens, getString(kind), l.zoomFactor, if (l.listed) "" else getString(R.string.lens_hidden))
     }
 
     /**
@@ -563,6 +620,7 @@ class MainActivity : AppCompatActivity() {
                 cameraTimestampRealtime = p.timestampRealtime,
                 audioAllowed = hasPermission(Manifest.permission.RECORD_AUDIO),
             )
+            if (prefs.getBoolean(PREF_TELEMETRY, true)) startTelemetry(rec.baseName ?: "OTC", p)
             rp.attachEncoder(enc.inputSurface, enc.width, enc.height)
             recorder = rec
             recordButton.isActivated = true
@@ -577,14 +635,59 @@ class MainActivity : AppCompatActivity() {
         recorder = null
         pipeline?.detachEncoder()
         recordButton.isActivated = false
+        val log = telemetry
+        telemetry = null
+        camera?.telemetry = null
+        analysis?.telemetry = null
+        pipeline?.telemetry = null
         val finish = {
             val uri = rec.stop()
+            log?.close()
             runOnUiThread {
-                val msg = if (uri != null) getString(R.string.saved, "Movies/OpenTrack") else getString(R.string.save_failed)
+                val msg = if (uri == null) getString(R.string.save_failed)
+                else if (log != null) getString(R.string.saved_with_log) else getString(R.string.saved, "Movies/OpenTrack")
                 Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             }
         }
         if (blocking) finish() else thread(name = "recorder-stop") { finish() }
+    }
+
+    /**
+     * Opens the recording's log and writes its header: everything needed to make sense of the
+     * per-frame records (stream, lens, focal length, settings, modes).
+     */
+    private fun startTelemetry(baseName: String, p: CameraProfile) {
+        val t = Telemetry.create(contentResolver, baseName) ?: return
+        val version = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
+        t.line("start").s("video", "$baseName.mp4").s("app", version).s("device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
+            .s("android", android.os.Build.VERSION.RELEASE).s("profile", p.label).s("camera", p.cameraId).s("physical", p.physicalCameraId)
+            .s("lens", lens?.key).n("lensFocalMm", lens?.focalMm?.toDouble(), 2).n("lensFactor", lens?.zoomFactor, 2)
+            .i("srcW", p.sourceSize.width).i("srcH", p.sourceSize.height).i("fps", p.fps).i("captureFps", p.captureFps)
+            .n("focalPx", p.focalPx).i("sensorOrientation", p.sensorOrientation).i("displayRotation", display?.rotation ?: -1)
+            .i("outW", outputWidth).i("outH", outputHeight).b("gyro", gyro?.available == true).b("ois", p.hasOis)
+            .n("rsSkewMs", pipeline?.rollingShutter?.let { it.skewNs / 1e6 }, 2)
+            // Camera timestamps ("ts") are elapsedRealtime when true, else another clock; "rt" is always elapsedRealtime.
+            .b("tsRealtime", p.timestampRealtime).i("rt", SystemClock.elapsedRealtimeNanos()).send()
+        telemetry = t
+        lastLoggedSettings = null
+        logSettings()
+        camera?.telemetry = t
+        analysis?.telemetry = t
+        pipeline?.telemetry = t
+    }
+
+    /** A "set" record whenever a user setting changed during the recording. */
+    private fun logSettings() {
+        val t = telemetry ?: return
+        val line = t.line("set").i("shutterNs", settings.shutterNs).n("ev", settings.evThirds / 3.0, 2).b("focusInf", settings.focusInfinity)
+            .n("cameraZoom", settings.zoomRatio.toDouble(), 2).s("stab", stabPreset.name).b("horizon", horizonLock)
+            .b("autoZoom", zoomConfig.auto).n("zoomMin", zoomConfig.minZoom, 2).n("zoomMax", zoomConfig.maxZoom, 2).n("cropZoom", cropZoom, 2)
+            .s("detector", detectorMode.name).s("target", targetClasses.name).b("autoLock", autoLock).s("view", previewMode.name)
+        // Only when something changed (the line without its timestamp is the comparison key).
+        val key = line.toString()
+        if (key == lastLoggedSettings) return
+        lastLoggedSettings = key
+        line.i("rt", SystemClock.elapsedRealtimeNanos()).send()
     }
 
     /** Frame rate the pipeline actually gets, for the camera report. */
@@ -610,6 +713,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshButtons() {
+        logSettings()
+        findViewById<Button>(R.id.lens).text = lensLabel()
+        findViewById<Button>(R.id.telemetry).setText(if (prefs.getBoolean(PREF_TELEMETRY, true)) R.string.telemetry_on else R.string.telemetry_off)
         findViewById<Button>(R.id.viewMode).setText(if (previewMode == PreviewMode.WIDE) R.string.view_wide else R.string.view_output)
         findViewById<Button>(R.id.autoLock).setText(if (autoLock) R.string.auto_lock_on else R.string.auto_lock_off)
         findViewById<Button>(R.id.detector).setText(
@@ -650,6 +756,8 @@ class MainActivity : AppCompatActivity() {
         const val PREF_SHUTTER = "shutterNs"
         const val PREF_DETECTOR = "detectorMode"
         const val PREF_TARGET = "targetClasses"
+        const val PREF_LENS = "lens"
+        const val PREF_TELEMETRY = "telemetry"
         /** Shutter choices: automatic, then 1/250 … 1/2000 s. */
         val SHUTTERS = listOf(0L, 4_000_000L, 2_000_000L, 1_000_000L, 500_000L)
         const val FORCED_4K60 = "3840x2160@60!"

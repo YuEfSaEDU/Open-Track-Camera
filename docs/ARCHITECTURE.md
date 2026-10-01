@@ -279,6 +279,39 @@ yüksek hız modu 120/240). Çözüm: kendi kamerayla 4K60 çek, sonra uygulamad
   zamanları `CLOCK_MONOTONIC`'e çevirip ilk video karesine göre sıfırlar.
 - Dosya `MediaStore` üzerinden `Movies/OpenTrack/OTC_yyyyMMdd_HHmmss.mp4` olarak yazılır.
 
+### Kayıt günlüğü (`Telemetry`)
+
+Kayıt sürerken (ayar açıksa) `Download/OpenTrack/OTC_yyyyMMdd_HHmmss.jsonl` dosyasına satır başına bir
+JSON nesnesi yazılır. Satırlar çağıran thread'de kurulur, ayrı bir thread'de yazılır; yazıcı geride
+kalırsa satır atılır ve sayılır (kamera ve render thread'leri hiç beklemez). `ts` kamera zaman
+damgasıdır (ns); `rt` her zaman `elapsedRealtime`.
+
+| `k` | Kaynak | Alanlar |
+|---|---|---|
+| `start` | kayıt başı | video adı, sürüm, cihaz, profil, kamera / fiziksel kimlik, lens, kaynak boyutu, fps, `focalPx`, sensör ve ekran yönü, çıkış boyutu, jiroskop, OIS, rolling shutter süresi, `tsRealtime` |
+| `set` | ayar değişince | enstantane, EV, odak, kamera zumu, stabilizasyon, ufuk, zum sınırları, dedektör, hedef türü, otomatik kilit, görünüm |
+| `cam` | her kare (capture result) | `exp`, `iso`, `dur`, `fl` (odak uzaklığı, mm), `zoom`, AE/AF durumları, `focus`, `skew`, `phys` (çok kameralıda etkin lens) |
+| `ae` | pozlama döngüsü (~10 Hz) | `manual`: ölçülen ve hedef parlaklık, karenin gerçek ayarları, yeni ayarlar; `auto`: öğrenilen hedef, oturma |
+| `nn` | her sinir ağı çalışması | süre, sonuç sayısı, yakınlaştırılmış bölge (`roi`) |
+| `trk` | her analiz karesi | durum, hedef kutusu (o karenin görüntüsünde), hız, güven, `framable`, ölçüldü mü, son ölçümün yaşı, verilen tespitler `[etiket, skor, cx, cy, w, h, kaynak]` |
+| `live` | her kare | canlı (nedensel) kırpma, zum, jiroskop pozu (kayma + roll), durum |
+| `out` | her kaydedilen kare | `t` (videodaki zaman, s), kırpma, roll, perspektif gücü, hedefin o karedeki yeri |
+| `end` | kayıt sonu | atılan satır sayısı |
+
+`tools/telemetry/summarize.py` kare aralıklarını, pozlamayı (parlaklığın hedeften sapması), lens
+değişimlerini, takip durumlarını ve kaydedilen kırpmanın en büyük sıçramalarını videodaki zamanlarıyla
+özetler.
+
+### Lens seçimi (`CameraProfile.lenses`)
+
+Arka lensler: telefonun listelediği kameralar, listelemeyip özelliklerini verdiği kimlikler (0–9
+denenir, kamera raporundaki gibi) ve mantıksal çok-kameraların arkasındaki fiziksel lensler (mantıksal
+kamera üzerinden `setPhysicalCameraId` ile). Görüş açısı ana lense göre `odak / sensör genişliği`
+oranından hesaplanır (geniş açı <1, tele >1). Profil (4K60 vb.) seçilen lensin akış tablosundan
+seçilir. Listelenmeyen bir lens açılmazsa (`openCamera` hatası ya da oturum kurulamaması, hiç kare
+gelmeden) uygulama ana lense döner. Odak uzaklığı (`focalPx`) her lensin kendi değerleridir; jiroskop,
+perspektif ve rolling shutter buna göre çalışır.
+
 ## Gerçek video testleri
 
 `tools/video_bench/run_bench.py` ile açık lisanslı 6 hava gösterisi videosu (Wikimedia Commons ve
@@ -420,6 +453,9 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
 - [ ] Cihazın 4K60 profili seçiliyor mu (durum satırı `3840x2160@60 → 1920x1080@60`)?
 - [ ] Render ≥ 59 fps, analiz < 10 ms, NN süresi (durum satırında).
 - [ ] Kayıt: ses/görüntü senkronu, 60 fps sabit kare hızı, dosya galeride görünüyor mu.
+- [ ] Kayıt günlüğü `Download/OpenTrack`'te videoyla aynı adla çıkıyor mu; `summarize.py` `out`
+      kare hızını videoyla aynı ve `dropped: 0` gösteriyor mu.
+- [ ] Lens düğmesi: geniş açı açılıyor mu, açılmıyorsa ana lense dönüş mesajı geliyor mu.
 
 ## Yol haritası
 

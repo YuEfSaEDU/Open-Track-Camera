@@ -19,7 +19,8 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
 ## Özellikler (v0.1)
 
 - **4K60 → 1080p60 kırpma**: 2x kırpma yakınlaştırmasında piksel kaybı yok (1:1). Kırpma zumu
-  1x–4x ayarlanabilir; lens zumu (`CONTROL_ZOOM_RATIO`) ile telefoto kameraya geçilebilir.
+  1x–4x ayarlanabilir; kamera zumu (`CONTROL_ZOOM_RATIO`) ayrıca ayarlanabilir (bazı telefonlarda
+  belli bir oranın üstünde telefoto kameraya geçer; günlükteki odak uzaklığı bunu gösterir).
 - **Hibrit hedef tespiti**
   - Sinir ağı: MediaPipe EfficientDet-Lite0 (COCO `airplane` sınıfı), ~10 Hz, asenkron.
   - Gökyüzü dedektörü: düz gökyüzünde birkaç piksellik uzak uçakları bulan klasik yöntem
@@ -59,6 +60,13 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   uygulanır, 1080p sonuç ve orijinal ses `Movies/OpenTrack` klasörüne yazılır. Kamera hareketi
   görüntüden kestirilir (kayıtlı videoda jiroskop yok).
 - **Kayıt**: donanım H.264 (isteğe bağlı HEVC) 40 Mbps + AAC ses, `Movies/OpenTrack` klasörüne.
+- **Kayıt günlüğü (telemetri)**: her kaydın yanına `Download/OpenTrack/OTC_….jsonl` yazılır: kare
+  kare kamera ayarları (enstantane, ISO, odak uzaklığı, lens), pozlama döngüsünün kararları, tespitler,
+  takip durumu, canlı ve kaydedilen kırpma — her biri videodaki zamanıyla. "Günlük" düğmesiyle
+  kapatılabilir; özet için `python3 tools/telemetry/summarize.py OTC_….jsonl --events`.
+- **Lens seçimi**: "Lens" düğmesi telefonun arka lensleri arasında geçer (ana, geniş açı, tele).
+  Telefonun diğer uygulamalara listelemediği lensler de "(gizli)" olarak denenir; açılmazsa ana lense
+  dönülür. Kamera raporunda "Arka lensler" satırı hangi lenslerin görüldüğünü gösterir.
 - **Arayüz**: Geniş görünüm (tüm sensör + kırpma çerçevesi) / Çıkış görünümü (kaydedilen görüntü),
   dokunarak hedef seçme, otomatik kilit.
 

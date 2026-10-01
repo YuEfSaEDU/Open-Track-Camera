@@ -46,6 +46,30 @@ data class CameraProfile(
 ) {
     val label: String get() = "${sourceSize.width}x${sourceSize.height}@$fps" + (if (highSpeed) " HS" else "") + if (forced) "!" else ""
 
+    /** The lens this profile streams from, as a [Lens.key]. */
+    val lensKey: String get() = Lens.key(cameraId, physicalCameraId)
+
+    /**
+     * A back lens to stream from: a camera the phone lists, one it does not list but describes
+     * (makers often keep the ultra wide or telephoto for their own app; opening it may fail),
+     * or a physical lens behind a logical multi-camera (streamed through [cameraId]).
+     */
+    data class Lens(
+        val cameraId: String,
+        val physicalId: String?,
+        val focalMm: Float,
+        /** Angle of view relative to the main lens: 0.6 for an ultra wide, 2.5 for a 2.5x telephoto. */
+        val zoomFactor: Double,
+        /** Listed by the phone (or reached through a listed logical camera). */
+        val listed: Boolean,
+    ) {
+        val key: String get() = key(cameraId, physicalId)
+
+        companion object {
+            fun key(cameraId: String, physicalId: String?) = cameraId + (physicalId?.let { "/$it" } ?: "")
+        }
+    }
+
     companion object {
         private data class Candidate(val size: Size, val fps: Int, val highSpeed: Boolean = false)
 
@@ -59,20 +83,81 @@ data class CameraProfile(
             Candidate(Size(1920, 1080), 30),
         )
 
-        /** The best available profile, or the one labelled [preferred] if it is available. */
-        fun select(manager: CameraManager, preferred: String? = null, force4k60: Boolean = false): CameraProfile? {
-            val all = available(manager)
+        /**
+         * The best available profile, or the one labelled [preferred] if it is available; from
+         * [lens] when given (null = the phone's default choice).
+         */
+        fun select(manager: CameraManager, preferred: String? = null, force4k60: Boolean = false, lens: Lens? = null): CameraProfile? {
+            val all = available(manager, lens)
             if (force4k60 && all.none { it.sourceSize == FOUR_K && it.fps == 60 }) {
-                backCameras(manager).firstNotNullOfOrNull { (id, c) -> build(id, c, FOUR_K, 60, force = true) }?.let { return it }
+                if (lens != null) {
+                    characteristics(manager, lens)?.let { c -> build(lens.cameraId, c, FOUR_K, 60, force = true)?.copy(physicalCameraId = lens.physicalId) }?.let { return it }
+                } else {
+                    backCameras(manager).firstNotNullOfOrNull { (id, c) -> build(id, c, FOUR_K, 60, force = true) }?.let { return it }
+                }
             }
             return all.firstOrNull { it.label == preferred } ?: all.firstOrNull()
         }
 
         /**
-         * All wanted profiles the phone offers, best first: each back camera, and each hidden
-         * physical camera behind a logical one (streamed through the logical camera).
+         * Every back lens the phone describes, main lens first, then by angle of view (widest
+         * first). Ids the phone does not list are probed like in the camera report.
          */
-        fun available(manager: CameraManager): List<CameraProfile> {
+        fun lenses(manager: CameraManager): List<Lens> {
+            val listedIds = manager.cameraIdList.toList()
+            val found = ArrayList<Pair<Lens, Double>>() // lens, focal / sensor width
+            val seen = HashSet<String>()
+            fun add(cameraId: String, physicalId: String?, c: CameraCharacteristics, listed: Boolean) {
+                // (A logical multi-camera counts too: it switches between its lenses with the zoom.)
+                if (c.get(CameraCharacteristics.LENS_FACING) != CameraMetadata.LENS_FACING_BACK) return
+                val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return
+                val width = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width?.takeIf { it > 0 } ?: return
+                found += Lens(cameraId, physicalId, focal, 1.0, listed) to (focal / width).toDouble()
+            }
+            val probe = listedIds + (0..9).map { it.toString() }.filter { it !in listedIds }
+            for (id in probe) {
+                if (!seen.add(id)) continue
+                val c = runCatching { manager.getCameraCharacteristics(id) }.getOrNull() ?: continue
+                val listed = id in listedIds
+                add(id, null, c, listed)
+                if (listed) {
+                    // Physical lenses are reached through their logical camera, not probed on their own.
+                    for (phys in c.physicalCameraIds) {
+                        val pc = runCatching { manager.getCameraCharacteristics(phys) }.getOrNull() ?: continue
+                        seen += phys
+                        add(id, phys, pc, true)
+                    }
+                }
+            }
+            if (found.isEmpty()) return emptyList()
+            // The main lens: the one the phone's default profile uses, else the first listed.
+            val defaultKey = runCatching { available(manager).firstOrNull()?.lensKey }.getOrNull()
+            val main = found.firstOrNull { it.first.key == defaultKey } ?: found.firstOrNull { it.first.listed } ?: found.first()
+            val lenses = found.map { (l, f) -> l.copy(zoomFactor = f / main.second) }
+            return listOf(lenses.first { it.key == main.first.key }) + lenses.filter { it.key != main.first.key }.sortedBy { it.zoomFactor }
+        }
+
+        private fun characteristics(manager: CameraManager, lens: Lens): CameraCharacteristics? =
+            runCatching { manager.getCameraCharacteristics(lens.physicalId ?: lens.cameraId) }.getOrNull()
+
+        /**
+         * All wanted profiles the phone offers, best first: each back camera, and each hidden
+         * physical camera behind a logical one (streamed through the logical camera); with
+         * [lens], only that lens's.
+         */
+        fun available(manager: CameraManager, lens: Lens? = null): List<CameraProfile> {
+            if (lens != null) {
+                val c = characteristics(manager, lens) ?: return emptyList()
+                return WANTED.mapNotNull { wanted ->
+                    if (wanted.highSpeed) {
+                        // High-speed sessions cannot pick a physical lens.
+                        if (lens.physicalId != null) null else buildHighSpeed(lens.cameraId, c, wanted.size, wanted.fps)
+                    } else {
+                        build(lens.cameraId, c, wanted.size, wanted.fps)?.copy(physicalCameraId = lens.physicalId)
+                    }
+                    // Like below: high speed only where the regular session cannot do that rate.
+                }.let { list -> list.filter { p -> !p.highSpeed || list.none { !it.highSpeed && it.sourceSize == p.sourceSize && it.fps == p.fps } } }
+            }
             val cams = backCameras(manager)
             val out = ArrayList<CameraProfile>()
             for (wanted in WANTED) {

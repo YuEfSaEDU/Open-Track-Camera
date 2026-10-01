@@ -36,12 +36,18 @@ class Recorder(private val resolver: ContentResolver) {
 
     val isRecording: Boolean get() = video != null
 
+    /** File name of the recording without extension (e.g. OTC_20261001_110059), once started. */
+    var baseName: String? = null
+        private set
+
     /**
      * @param cameraTimestampRealtime whether camera timestamps are CLOCK_BOOTTIME based
      *   (SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME); they are converted to CLOCK_MONOTONIC.
      */
     fun start(config: RecordingConfig, cameraTimestampRealtime: Boolean, audioAllowed: Boolean): VideoEncoder {
-        val name = "OTC_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+        val base = "OTC_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        baseName = base
+        val name = "$base.mp4"
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, name)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")

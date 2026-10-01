@@ -46,6 +46,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.mediapipe.tasks.vision)
+    testImplementation(libs.junit)
 }
 
 // The COCO EfficientDet-Lite model (contains the "airplane" class) is fetched at build

@@ -19,6 +19,7 @@ object CameraReport {
         appendLine("${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE}), Android ${Build.VERSION.RELEASE} / API ${Build.VERSION.SDK_INT}")
         appendLine("Seçilen profil: ${chosen?.label ?: "-"} kamera ${chosen?.cameraId ?: "-"}${chosen?.physicalCameraId?.let { " (fiziksel $it)" } ?: ""}")
         appendLine("Kullanılabilir profiller: ${runCatching { CameraProfile.available(manager).joinToString { it.label + (it.physicalCameraId?.let { p -> " [fiz $p]" } ?: "") } }.getOrElse { it.toString() }}")
+        appendLine("Arka lensler: ${runCatching { CameraProfile.lenses(manager).joinToString { l -> "${l.key} ${l.focalMm} mm %.2fx".format(l.zoomFactor) + if (l.listed) "" else " (listede yok)" } }.getOrElse { it.toString() }}")
         appendLine()
         val seen = LinkedHashSet<String>()
         val queue = ArrayDeque(manager.cameraIdList.toList())

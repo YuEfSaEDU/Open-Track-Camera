@@ -17,6 +17,7 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import com.opentrack.camera.diag.Telemetry
 import com.opentrack.tracking.ShutterPriorityExposure
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
@@ -43,6 +44,9 @@ class CameraController(
 
     var listener: Listener? = null
 
+    /** While recording: per-frame camera settings and exposure loop decisions go here. */
+    @Volatile var telemetry: Telemetry? = null
+
     private val thread = HandlerThread("camera").apply { start() }
     private val handler = Handler(thread.looper)
     private val executor = Executor { handler.post(it) }
@@ -62,6 +66,17 @@ class CameraController(
     @SuppressLint("MissingPermission")
     fun open(target: Surface) {
         surface = target
+        // A camera the maker keeps for its own app (e.g. a lens only reachable by id) throws here.
+        try {
+            openDevice(target)
+        } catch (e: Exception) {
+            Log.e(TAG, "openCamera failed", e)
+            listener?.onError("camera ${profile.cameraId} could not be opened: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun openDevice(target: Surface) {
         manager.openCamera(profile.cameraId, executor, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
                 device = camera
@@ -117,7 +132,12 @@ class CameraController(
                 if (vendorExperiment) Log.i(TAG, "vendor session keys: " + VendorKeys.apply(this, characteristics))
             }.build()
         }.onFailure { Log.w(TAG, "session parameters rejected", it) }
-        camera.createCaptureSession(config)
+        try {
+            camera.createCaptureSession(config)
+        } catch (e: Exception) {
+            Log.e(TAG, "createCaptureSession failed", e)
+            listener?.onError("session failed for ${profile.label}: ${e.message ?: e.javaClass.simpleName}")
+        }
     }
 
     fun update(newSettings: CameraSettings) {
@@ -214,8 +234,13 @@ class CameraController(
         val e = ae ?: return@post
         if (manualActive) {
             val shot = shotSettings(timestampNs) ?: return@post
-            if (e.update(mean, shot.second, shot.first)) applySettings(settings)
+            val changed = e.update(mean, shot.second, shot.first)
+            telemetry?.line("ae")?.i("ts", timestampNs)?.s("mode", "manual")?.n("luma", mean)?.n("aim", e.aimLuma)
+                ?.i("frameExp", shot.first)?.i("frameIso", shot.second)?.i("exp", e.exposureNs)?.i("iso", e.iso)?.b("changed", changed)?.send()
+            if (changed) applySettings(settings)
         } else {
+            telemetry?.line("ae")?.i("ts", timestampNs)?.s("mode", "auto")?.n("luma", mean)?.b("settled", aeSettled)
+                ?.n("target", e.targetLuma)?.i("obs", e.observations)?.b("ready", e.ready)?.send()
             // Learn only from settled auto exposure: right after the camera opens the frames are
             // far too dark, and taking over from those made the whole recording dark.
             // (Only while its compensation is neutral, i.e. shutter priority is wanted: with the
@@ -270,6 +295,20 @@ class CameraController(
                 }
                 lastAutoExposureNs = exposure
                 lastAutoIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: lastAutoIso
+            }
+            telemetry?.let { t ->
+                val line = t.line("cam").i("ts", ts).i("exp", exposure).i("iso", lastIso)
+                    .i("dur", result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: 0L)
+                    .n("fl", (result.get(CaptureResult.LENS_FOCAL_LENGTH) ?: 0f).toDouble(), 2)
+                    .n("zoom", (result.get(CaptureResult.CONTROL_ZOOM_RATIO) ?: 0f).toDouble(), 2)
+                    .i("aeMode", result.get(CaptureResult.CONTROL_AE_MODE) ?: -1)
+                    .i("aeState", result.get(CaptureResult.CONTROL_AE_STATE) ?: -1)
+                    .i("afState", result.get(CaptureResult.CONTROL_AF_STATE) ?: -1)
+                    .n("focus", (result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: -1f).toDouble(), 2)
+                    .i("skew", skew)
+                // Which physical lens a multi-camera actually streams from (it may switch with zoom).
+                result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { line.s("phys", it) }
+                line.send()
             }
             listener?.onFrameMetadata(ts, exposure, skew)
         }

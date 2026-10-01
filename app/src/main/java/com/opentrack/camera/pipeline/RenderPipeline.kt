@@ -8,6 +8,7 @@ import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
 import com.opentrack.camera.camera.CameraProfile
+import com.opentrack.camera.diag.Telemetry
 import com.opentrack.camera.gl.EglCore
 import com.opentrack.camera.gl.FrameRenderer
 import com.opentrack.camera.gl.ReadbackTarget
@@ -58,6 +59,13 @@ class RenderPipeline(
     }
 
     @Volatile var previewMode = PreviewMode.WIDE
+
+    /**
+     * While recording: the live crop and camera pose of every frame ("live") and the crop each
+     * recorded frame was rendered with ("out", with its time in the video).
+     */
+    @Volatile var telemetry: Telemetry? = null
+    private var firstWrittenNs = Long.MIN_VALUE
 
     /**
      * Rolling shutter timing of the camera stream; with gyro motion the output is corrected for
@@ -165,6 +173,7 @@ class RenderPipeline(
         encoderHeight = height
         // Only frames captured from now on go into the file (older ones are still in the ring).
         recordFromNs = Long.MAX_VALUE
+        firstWrittenNs = Long.MIN_VALUE
         pendingRecordStart = true
     }
 
@@ -267,6 +276,12 @@ class RenderPipeline(
         val live = framing.update(ts, framed)
         val capture = captureFor(live)
         ring?.store(renderer, texture, texMatrix, srcW, srcH, capture, ts)
+        telemetry?.let { t ->
+            val pose = motion.poseAt(ts)
+            t.line("live").i("ts", ts).a("crop", live.cx, live.cy, live.width, live.height).n("rot", live.rotation, 4)
+                .n("zoom", framing.zoom, 3).a("pose", pose.offset.x, pose.offset.y).n("roll", pose.roll, 4)
+                .s("state", prediction.state.name).b("framed", framed.hasTarget).send()
+        }
 
         // 4. Stabilized output for the delayed frame.
         framer.addFrame(ts, live.width, live.height, capture)
@@ -317,9 +332,21 @@ class RenderPipeline(
         val slot = ring?.find(out.timestampNs) ?: return
         egl.makeCurrent(enc)
         GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
-        ring?.draw(slot, out.crop, shutterFor(out.timestampNs), homographyFor(out, slot))
+        val h = homographyFor(out, slot)
+        ring?.draw(slot, out.crop, shutterFor(out.timestampNs), h)
         egl.setPresentationTime(enc, out.timestampNs)
         egl.swap(enc)
+        telemetry?.let { t ->
+            if (firstWrittenNs == Long.MIN_VALUE) firstWrittenNs = out.timestampNs
+            val c = out.crop
+            val line = t.line("out").n("t", (out.timestampNs - firstWrittenNs) / 1e9, 4).i("ts", out.timestampNs)
+                .a("crop", c.cx, c.cy, c.width, c.height).n("rot", c.rotation, 4).n("persp", if (h == null) 0.0 else viewStrength, 2)
+            out.track?.takeIf { it.hasTarget }?.let { p ->
+                val img = motion.poseAt(out.timestampNs).toImage(p.worldAt(out.timestampNs), Vec2(srcW / 2.0, srcH / 2.0))
+                line.a("target", img.x, img.y, p.width, p.height).s("state", p.state.name)
+            }
+            line.send()
+        }
     }
 
     /**

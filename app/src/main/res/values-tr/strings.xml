@@ -26,7 +26,7 @@
     <string name="auto_zoom_off">Oto zoom: kapalı</string>
     <string name="zoom_min">Min %s</string>
     <string name="zoom_max">Maks %s</string>
-    <string name="lens_zoom">Lens %.1fx</string>
+    <string name="lens_zoom">Kamera zoom %.1fx</string>
     <string name="ev">EV %+.1f</string>
     <string name="state_idle">BEKLİYOR</string>
     <string name="state_tracking">TAKİPTE</string>
@@ -50,4 +50,14 @@
     <string name="processing_failed">İşleme başarısız: %s</string>
     <string name="processing_cancelled">İşleme iptal edildi</string>
     <string name="crash_recorded">Uygulama geçen sefer beklenmedik şekilde kapandı. Lütfen kamera raporunu paylaşın.</string>
+    <string name="lens">Lens: %1$s %2$.1fx%3$s</string>
+    <string name="lens_main">ana</string>
+    <string name="lens_wide">geniş</string>
+    <string name="lens_tele">tele</string>
+    <string name="lens_hidden"> (gizli)</string>
+    <string name="lens_failed">Bu lens açılamadı (üretici kendi uygulamasına ayırmış olabilir); ana lense dönüldü. %s</string>
+    <string name="lens_hidden_hint">Deneysel: telefon bu lensi diğer uygulamalara listelemiyor. Görüntü siyah kalır ya da hata verirse geri dön.</string>
+    <string name="telemetry_on">Günlük: açık</string>
+    <string name="telemetry_off">Günlük: kapalı</string>
+    <string name="saved_with_log">Kaydedildi: Movies/OpenTrack, günlük Download/OpenTrack</string>
 </resources>

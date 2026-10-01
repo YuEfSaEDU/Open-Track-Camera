@@ -7,6 +7,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import com.opentrack.camera.detect.DetectorHost
+import com.opentrack.camera.diag.Telemetry
 import com.opentrack.camera.detect.TargetClasses
 import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.Detection
@@ -16,6 +17,7 @@ import com.opentrack.tracking.NeuralRun
 import com.opentrack.tracking.ShutterPriorityExposure
 import com.opentrack.tracking.SkyBlobDetector
 import com.opentrack.tracking.TargetTracker
+import com.opentrack.tracking.TrackPrediction
 import com.opentrack.tracking.TrackState
 import com.opentrack.tracking.Vec2
 import com.opentrack.tracking.VisualMotionEstimator
@@ -52,6 +54,8 @@ class AnalysisEngine(
     @Volatile var neuralIntervalMs = 100L
     /** Mean luma of the analysis frames, ~10 Hz, for the exposure loop (analysis thread). */
     @Volatile var onSceneLuma: ((Double, Long) -> Unit)? = null
+    /** While recording: detections and the tracker's state per analysis frame go here. */
+    @Volatile var telemetry: Telemetry? = null
     @Volatile var lastAnalysisMs = 0.0
         private set
     @Volatile var lastNeuralMs = 0.0
@@ -111,6 +115,8 @@ class AnalysisEngine(
                 val dets = det.detect(bmp, timestampNs, area, targetClasses.labels) ?: return@execute
                 lastNeuralMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6
                 neuralResults.add(NeuralRun(timestampNs, region, NEURAL_INPUT) to dets)
+                telemetry?.line("nn")?.i("ts", timestampNs)?.n("ms", lastNeuralMs)?.i("n", dets.size)
+                    ?.let { l -> if (region != null) l.a("roi", region.cx, region.cy, region.width, region.height, digits = 0) else l }?.send()
             } catch (e: Exception) {
                 Log.e(TAG, "neural detection failed", e)
             } finally {
@@ -150,9 +156,34 @@ class AnalysisEngine(
                 Box(c.x, c.y, maxOf(p.width, 24 * scale), maxOf(p.height, 24 * scale))
             } else null
             lastAnalysisMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6
+            telemetry?.let { logTrack(it, frame.timestampNs, p, detections) }
         } finally {
             freeBuffers.offer(frame.data)
         }
+    }
+
+    /**
+     * One "trk" record: the tracker's state after this analysis frame (target in image px of
+     * that frame) and every detection it was given ([label, score, cx, cy, w, h, source]).
+     */
+    private fun logTrack(t: Telemetry, ts: Long, p: TrackPrediction, detections: List<Detection>) {
+        val line = t.line("trk").i("ts", ts).s("state", p.state.name).n("ms", lastAnalysisMs)
+        if (p.hasTarget) {
+            val c = motion.poseAt(ts).toImage(p.worldAt(ts), sourceCenter)
+            line.a("box", c.x, c.y, p.width, p.height).a("vel", p.velocity.x, p.velocity.y).n("conf", p.confidence, 2)
+                .b("framable", p.framable).b("measured", p.measuredWorld != null).n("age", (ts - p.lastMeasuredNs) / 1e6, 0)
+        }
+        if (detections.isNotEmpty()) {
+            val sb = StringBuilder("[")
+            detections.forEachIndexed { k, d ->
+                if (k > 0) sb.append(',')
+                sb.append("[\"").append(d.label.replace("\"", "")).append("\",").append(Telemetry.num(d.score.toDouble(), 2))
+                for (v in doubleArrayOf(d.box.cx, d.box.cy, d.box.width, d.box.height)) sb.append(',').append(Telemetry.num(v, 0))
+                sb.append(",\"").append(d.source.name).append("\"]")
+            }
+            line.raw("dets", sb.append(']').toString())
+        }
+        line.send()
     }
 
     fun selectAt(point: Vec2) = handler.post { tracker.selectAt(point) }
