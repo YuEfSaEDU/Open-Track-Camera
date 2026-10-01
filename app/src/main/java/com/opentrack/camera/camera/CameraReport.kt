@@ -67,6 +67,17 @@ object CameraReport {
         }
         appendLine("  distorsiyon düzeltme: ${dist ?: "yok"}, katsayılar: ${c.get(CameraCharacteristics.LENS_DISTORTION)?.joinToString { "%.4f".format(it) } ?: "-"}, " +
             "iç parametreler: ${c.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)?.joinToString { "%.1f".format(it) } ?: "-"}")
+        run {
+            // Focal length in array px: the one used (calibration if plausible) and the mm estimate.
+            val used = CameraProfile.focalArray(c)
+            val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
+            val physical = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+            val pixelArray = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+            val est = if (focal != null && physical != null && pixelArray != null && physical.width > 0) focal / physical.width * pixelArray.width else null
+            appendLine("  odak (dizi px): kullanılan ${used?.let { "%.1f (%s, dizi %d)".format(it.first, it.third, it.second) } ?: "-"}, mm tahmini ${est?.let { "%.1f".format(it) } ?: "-"}" +
+                " (sensör ${physical?.width}x${physical?.height} mm, dizi ${pixelArray?.width}x${pixelArray?.height}, " +
+                "aktif ${c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)?.let { "${it.width()}x${it.height()}" }})")
+        }
         appendLine("  OIS: ${if (ois) "var" else "yok"}, OIS kayması verisi: ${if (oisData) "var" else "yok"}, zaman damgası: " +
             if (c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) == CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) "realtime" else "bilinmiyor")
         val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return

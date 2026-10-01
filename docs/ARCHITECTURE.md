@@ -126,7 +126,10 @@ kaydı birkaç kare geciktirir.
    - Eksen dışı görüntünün dış tarafı daha çok kaynak piksel ister (600 px'te %19, 900 px'te %36).
      Yakalama penceresi o tarafa (marj kadar) kaydırılır. Sığmayan yerde (sensör kenarı)
      düzeltme gereken kadar azalır ve yavaşça geri gelir (kare başına %2), şekil aniden değişmez.
-   - Odak uzaklığı `CameraProfile.focalPx × zoomRatio` (jiroskop modeliyle aynı). Galeriden
+   - Odak uzaklığı `CameraProfile.focalPx × zoomRatio` (jiroskop modeliyle aynı). `focalPx`, kamera
+     bildiriyorsa fabrika kalibrasyonundan (`LENS_INTRINSIC_CALIBRATION` fx) gelir; yoksa mm odak / sensör
+     genişliği tahmininden. Tahmin birkaç % saparsa jiroskop düzeltmesi ve perspektif o kadar kayar
+     (kalan titreme, bükülme); kamera raporu iki değeri yan yana gösterir. Galeriden
      işlemede kapalı: videonun hangi lensle çekildiği bilinmiyor.
    - Doğrulama: `PerspectiveViewTest` (eksen dışı hedef, karşıdan bakan kameranın görüntüsüyle
      0.01 px altında aynı; düz kırpma 30 px'ten fazla sapıyor) ve `tools/shader_check`

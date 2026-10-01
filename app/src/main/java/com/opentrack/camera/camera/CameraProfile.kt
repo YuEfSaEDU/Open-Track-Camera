@@ -197,6 +197,33 @@ data class CameraProfile(
 
         private val FOUR_K = Size(3840, 2160)
 
+        /**
+         * Focal length in sensor array px, the width of that array, and where it came from: the
+         * factory calibration (LENS_INTRINSIC_CALIBRATION fx, in pre-correction active array px)
+         * when the camera reports a plausible one, else focal length (mm) / sensor width (mm).
+         * The estimate rests on the rounded sensor size the phone reports; a few percent off
+         * scales every gyro correction and the perspective correction by as much.
+         */
+        fun focalArray(c: CameraCharacteristics): Triple<Double, Int, String>? {
+            val estimate = run {
+                val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return@run null
+                val physical = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return@run null
+                val pixelArray = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: return@run null
+                val active = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return@run null
+                if (physical.width <= 0f) return@run null
+                Triple((focal / physical.width * pixelArray.width).toDouble(), active.width(), "mm")
+            }
+            val fx = c.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)?.getOrNull(0)?.toDouble()
+            val preCorrection = c.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE)
+                ?: c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            if (fx != null && fx > 0 && preCorrection != null && preCorrection.width() > 0) {
+                // Trust it unless it is far from the estimate (a bogus or differently scaled value).
+                val plausible = estimate == null || abs(fx * estimate.second / preCorrection.width() / estimate.first - 1) < 0.25
+                if (plausible) return Triple(fx, preCorrection.width(), "kalibrasyon")
+            }
+            return estimate
+        }
+
         private fun backCameras(manager: CameraManager): List<Pair<String, CameraCharacteristics>> =
             manager.cameraIdList.map { it to manager.getCameraCharacteristics(it) }
                 .filter { it.second.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_BACK }
@@ -240,17 +267,10 @@ data class CameraProfile(
                 ?: if (force) Range(fps, fps) else return null
 
             val capabilities = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet().orEmpty()
-            val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 4.5f
-            val physical = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-            val pixelArray = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
-            val active = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-            val focalPx = if (physical != null && pixelArray != null && active != null) {
-                // f in pixel-array pixels, then scaled to the stream (which spans the active array width).
-                val fArray = focal / physical.width * pixelArray.width
-                fArray * size.width / active.width()
-            } else {
-                size.width * 0.8 // ~ 64° horizontal FOV fallback
-            }
+            val focalPx = focalArray(c)?.let { (fArray, arrayWidth, _) ->
+                // The stream spans the array's width (16:9 streams are cut from 4:3 sensors in height).
+                fArray * size.width / arrayWidth
+            } ?: (size.width * 0.8) // ~ 64° horizontal FOV fallback
             val ois = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
                 ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
 
