@@ -290,6 +290,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
         rp.previewMode = previewMode
+        rp.focalPx = p.focalPx * settings.zoomRatio
         pipeline = rp
         rp.start()
         previewSurface?.let { rp.setPreviewSurface(it) }
@@ -414,7 +415,10 @@ class MainActivity : AppCompatActivity() {
     private fun updateSettings(s: CameraSettings) {
         settings = s
         camera?.update(s)
-        profile?.let { p -> gyroModel?.focalPx = p.focalPx * s.zoomRatio }
+        profile?.let { p ->
+            gyroModel?.focalPx = p.focalPx * s.zoomRatio
+            pipeline?.focalPx = p.focalPx * s.zoomRatio
+        }
         refreshButtons()
     }
 

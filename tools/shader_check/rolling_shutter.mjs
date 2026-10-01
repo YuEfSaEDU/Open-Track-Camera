@@ -75,11 +75,16 @@ async function page_fn({ VERTEX, FRAGMENT }) {
   tex(1, SW / 2, SH / 2, gl.RG8, gl.RG, uv);
   const U = (n) => gl.getUniformLocation(prog, n);
   gl.uniform1i(U("sY"), 0); gl.uniform1i(U("sUV"), 1);
-  // YuvRing.draw: origin and axes in slot units.
+  // YuvRing.draw: homography (row-major) from output-local source px to source px, uploaded
+  // column-major. Flat crop, and the same with a perspective (keystone) term as PerspectiveView
+  // produces for an off-axis virtual camera.
   const c = Math.cos(crop.rot), s = Math.sin(crop.rot);
-  gl.uniform2f(U("uOrigin"), (crop.cx - cap.left) / cap.width, (crop.cy - cap.top) / cap.height);
-  gl.uniform2f(U("uAxisX"), c * crop.w / cap.width, s * crop.w / cap.height);
-  gl.uniform2f(U("uAxisY"), -s * crop.h / cap.width, c * crop.h / cap.height);
+  const flat = [c, -s, crop.cx, s, c, crop.cy, 0, 0, 1];
+  const ka = 6e-5, kb = -3e-5; // flat · [[1,0,0],[0,1,0],[ka,kb,1]]
+  const persp = [flat[0] + flat[2] * ka, flat[1] + flat[2] * kb, flat[2], flat[3] + flat[5] * ka, flat[4] + flat[5] * kb, flat[5], ka, kb, 1];
+  const setH = (H) => gl.uniformMatrix3fv(U("uH"), false, new Float32Array([H[0], H[3], H[6], H[1], H[4], H[7], H[2], H[5], H[8]]));
+  const mapH = (H, ux, uy) => { const w = H[6] * ux + H[7] * uy + H[8]; return [(H[0] * ux + H[1] * uy + H[2]) / w, (H[3] * ux + H[4] * uy + H[5]) / w]; };
+  gl.uniform2f(U("uHalf"), crop.w / 2, crop.h / 2);
   gl.uniform3fv(U("uRs"), rs);
   gl.uniform2f(U("uCapOrigin"), cap.left, cap.top);
   gl.uniform2f(U("uCapSize"), cap.width, cap.height);
@@ -91,7 +96,8 @@ async function page_fn({ VERTEX, FRAGMENT }) {
   gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
   gl.viewport(0, 0, OW, OH);
 
-  const render = (on) => {
+  const render = (on, H) => {
+    setH(H);
     gl.uniform1i(U("uRsOn"), on);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     const px = new Uint8Array(OW * OH * 4);
@@ -100,19 +106,21 @@ async function page_fn({ VERTEX, FRAGMENT }) {
   };
   // Expected: the ideal frame through the same crop. Output pixel (i, j) from the top-left;
   // GL rows start at the bottom.
-  const score = (px) => {
+  const score = (px, H) => {
     let sum = 0, n = 0;
     for (let j = 8; j < OH - 8; j++) for (let i = 8; i < OW - 8; i++) {
       const ux = (i + 0.5) / OW - 0.5, uy = (j + 0.5) / OH - 0.5;
-      const x = crop.cx + c * crop.w * ux - s * crop.h * uy, y = crop.cy + s * crop.w * ux + c * crop.h * uy;
+      const [x, y] = mapH(H, crop.w * ux, crop.h * uy);
       const got = px[((OH - 1 - j) * OW + i) * 4] / 255;
       sum += Math.abs(got - idealAt(x, y)); n++;
     }
     return sum / n;
   };
-  const corrected = score(render(1)), uncorrected = score(render(0));
-  // Reference: sampling the stored (raw) slot exactly where it should be, i.e. the error floor.
-  return { corrected, uncorrected, renderer: gl.getParameter(gl.RENDERER) };
+  const corrected = score(render(1, flat), flat), uncorrected = score(render(0, flat), flat);
+  // Perspective view: still exact (and the projective divide really happens per pixel: an
+  // affine interpolation of the corners would be off by tens of px in the middle).
+  const perspective = score(render(1, persp), persp), perspectiveAsFlat = score(render(1, persp), flat);
+  return { corrected, uncorrected, perspective, perspectiveAsFlat, renderer: gl.getParameter(gl.RENDERER) };
 }
 
 const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium", args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] }).catch(() => chromium.launch({ args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"] }));
@@ -123,6 +131,6 @@ console.log(JSON.stringify(r));
 if (r.error) process.exit(2);
 // Mean absolute luma error (0..1): corrected must be close to the resampling floor, and far
 // better than leaving the rolling shutter distortion in.
-const ok = r.corrected < 0.01 && r.corrected < r.uncorrected / 5;
+const ok = r.corrected < 0.01 && r.corrected < r.uncorrected / 5 && r.perspective < 0.01 && r.perspective < r.perspectiveAsFlat / 5;
 console.log(ok ? "PASS" : "FAIL");
 process.exit(ok ? 0 : 1);

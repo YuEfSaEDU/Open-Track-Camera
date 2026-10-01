@@ -111,6 +111,27 @@ kaydı birkaç kare geciktirir.
      (gerçek GLSL kodu, başsız Chromium WebGL2'de sentetik rolling-shutter karesinde çalıştırılır:
      ortalama luma hatası düzeltmesiz 0.053 → düzeltmeli 0.003, yeniden örnekleme tabanı).
 
+8. **Perspektif doğru kırpma (`PerspectiveView`).** Telefonun ana kamerası geniş açılıdır
+   (~70°) ve doğrusal (rectilinear) izdüşüm yapar: eksenden uzakta her şey yarıçap yönünde
+   1/cos² kadar uzar ve yamuklaşır. Kilitli hedef telefon dönerken sensörün kenarına kayınca düz
+   (2B) kırpma bu değişen uzamayı çıkışa taşır: sahne, perspektifle bükülen bir fotoğraf gibi
+   görünür. Kullanıcı kaydında ölçülen: arka plan konumu sabitken kenarlar arası %8 yamukluk,
+   %6 uzama ve 3° kayma; model bunu kırpmanın merkezden ~600 px (telefon ~13° dönmüş) uzak
+   olmasıyla birebir açıklıyor.
+   - Çözüm: her çıkış karesi, kırpma merkezinin ışınına dönmüş sanal bir kameranın görüntüsü
+     olarak çizilir (H = K·R·K⁻¹; kamera kendi merkezi etrafında dönerken uzak sahne için kesin).
+     Hedef, kameranın tam karşısındaymış gibi görünür. Merkezde düz kırpmayla aynıdır.
+   - Shader: tepe noktalarında homojen kaynak koordinatı, piksel başına bölme (projektif);
+     rolling shutter düzeltmesi bunun üstüne kaynak piksellerde uygulanır.
+   - Eksen dışı görüntünün dış tarafı daha çok kaynak piksel ister (600 px'te %19, 900 px'te %36).
+     Yakalama penceresi o tarafa (marj kadar) kaydırılır. Sığmayan yerde (sensör kenarı)
+     düzeltme gereken kadar azalır ve yavaşça geri gelir (kare başına %2), şekil aniden değişmez.
+   - Odak uzaklığı `CameraProfile.focalPx × zoomRatio` (jiroskop modeliyle aynı). Galeriden
+     işlemede kapalı: videonun hangi lensle çekildiği bilinmiyor.
+   - Doğrulama: `PerspectiveViewTest` (eksen dışı hedef, karşıdan bakan kameranın görüntüsüyle
+     0.01 px altında aynı; düz kırpma 30 px'ten fazla sapıyor) ve `tools/shader_check`
+     (perspektif homografi ile ortalama luma hatası 0.003; düz okunsa 0.096).
+
 Ön ayarlar: *uçağa kilit* (0.33 s, kilit), *hızlı* (0.2 s, yumuşaklık 0.4), *dengeli* (0.33 s, 0.6),
 *sinematik* (0.5 s, 0.8).
 Önizlemede "çıkış" görünümü kaydedilen (gecikmeli, stabilize) görüntüyü gösterir.
@@ -381,6 +402,8 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
 - [ ] **Rolling shutter yönü**: hızlı yatay pan'da dikey çizgiler (direk, bina kenarı) çıkışta dik
       kalmalı. Eğiklik *arttıysa* okuma yönü ters (`RollingShutter.readoutDirection`); cihaz
       `SENSOR_ROLLING_SHUTTER_SKEW` bildirmiyorsa (0) düzeltme kapalı kalır.
+- [ ] **Perspektif**: bir binaya kilitlenip telefonu yavaşça sağa sola çevirince bina yamuklaşmamalı.
+      Ters yönde yamukluk (abartılı düzeltme) görülürse `focalPx` küçük hesaplanıyor.
 - [ ] **Yakınlaştırılmış tespit**: durum satırındaki NN süresi 320x320 bölgede tam kareden farklı
       olmamalı; uzak uçakta takip kutusunun yeşil (onaylı) kalması.
 - [ ] Cihazın 4K60 profili seçiliyor mu (durum satırı `3840x2160@60 → 1920x1080@60`)?

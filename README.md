@@ -37,6 +37,9 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   (hız/ivme/sarsıntı cezası, kırpma ve hedef kısıtları). Kayma ve **roll (ufuk)** birlikte düzeltilir.
   Geçmiş kareler GPU'da YUV halka tamponda tutulur. Hedef yokken normal EIS gibi çalışır.
   Ön ayarlar: uçağa kilit / hızlı / dengeli / sinematik.
+- **Perspektif doğru kırpma**: hedef sensörün kenarına kaydığında görüntü düz kesilmez, o yöne
+  dönmüş sanal bir kameranın görüntüsü olarak çizilir. Geniş açılı lensin kenarındaki uzama ve
+  yamukluk çıkışa taşınmaz.
 - **Rolling shutter düzeltmesi**: jiroskopla her satırın okunma anındaki kamera pozu hesaplanır;
   pan'daki eğilme ve titremedeki "jöle" etkisi kayıtta GPU'da düzeltilir.
 - **Uçak fotoğrafçılığı ayarları**: sonsuza sabit odak (gökyüzünde AF aramasını önler), EV,

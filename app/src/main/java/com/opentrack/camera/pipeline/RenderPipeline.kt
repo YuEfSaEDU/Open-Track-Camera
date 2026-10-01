@@ -17,6 +17,7 @@ import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.CropWindow
 import com.opentrack.tracking.FramingController
 import com.opentrack.tracking.LookaheadFramer
+import com.opentrack.tracking.PerspectiveView
 import com.opentrack.tracking.RollingShutter
 import com.opentrack.tracking.StabilizerConfig
 import com.opentrack.tracking.TargetTracker
@@ -24,6 +25,8 @@ import com.opentrack.tracking.TrackPrediction
 import com.opentrack.tracking.Vec2
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * The GL render thread. For every camera frame:
@@ -63,6 +66,18 @@ class RenderPipeline(
     @Volatile var rollingShutter: RollingShutter? = null
     private var shutterTs = Long.MIN_VALUE
     private var shutter: YuvRing.ShutterCorrection? = null
+
+    /**
+     * Focal length of the stream in source px (lens zoom included). Above 0, each output crop
+     * is rendered as a virtual camera turned towards it (PerspectiveView): a target held in
+     * frame while the phone turns keeps its shape instead of stretching and keystoning like
+     * a photo bent in perspective near the edges of the wide lens.
+     */
+    @Volatile var focalPx: Double = 0.0
+    private var view: PerspectiveView? = null
+    private var viewTs = Long.MIN_VALUE
+    private var viewStrength = 0.0
+    private var viewHomography: DoubleArray? = null
 
     private val thread = HandlerThread("render").apply { start() }
     private val handler = Handler(thread.looper)
@@ -250,7 +265,7 @@ class RenderPipeline(
         // A tentative lock (not yet confirmed as an aircraft) is tracked but not framed.
         val framed = prediction.forFraming()
         val live = framing.update(ts, framed)
-        val capture = Box(live.cx, live.cy, live.width * CAPTURE_MARGIN, live.height * CAPTURE_MARGIN)
+        val capture = captureFor(live)
         ring?.store(renderer, texture, texMatrix, srcW, srcH, capture, ts)
 
         // 4. Stabilized output for the delayed frame.
@@ -272,7 +287,7 @@ class RenderPipeline(
             if (previewMode == PreviewMode.OUTPUT && out != null) {
                 val (x, y, cw, ch) = fit(vw, vh, out.crop.width / out.crop.height)
                 GLES20.glViewport(x, y, cw, ch)
-                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop, shutterFor(out.timestampNs)) } }
+                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop, shutterFor(out.timestampNs), homographyFor(out, it)) } }
             } else {
                 val (x, y, cw, ch) = fit(vw, vh, srcW.toDouble() / srcH)
                 GLES20.glViewport(x, y, cw, ch)
@@ -302,9 +317,53 @@ class RenderPipeline(
         val slot = ring?.find(out.timestampNs) ?: return
         egl.makeCurrent(enc)
         GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
-        ring?.draw(slot, out.crop, shutterFor(out.timestampNs))
+        ring?.draw(slot, out.crop, shutterFor(out.timestampNs), homographyFor(out, slot))
         egl.setPresentationTime(enc, out.timestampNs)
         egl.swap(enc)
+    }
+
+    /**
+     * Region of the frame kept in the ring: the live crop with room around it. With the
+     * perspective view on, it shifts (within its margin) towards the side where the corrected
+     * view of an off-axis crop needs more pixels.
+     */
+    private fun captureFor(live: CropWindow): Box {
+        var cx = live.cx
+        var cy = live.cy
+        val f = focalPx
+        if (f > 0) {
+            val v = view?.takeIf { it.focalPx == f } ?: PerspectiveView(srcW, srcH, f).also { view = it }
+            val fp = v.footprint(live)
+            val maxX = (CAPTURE_MARGIN - 1) / 2 * live.width
+            val maxY = (CAPTURE_MARGIN - 1) / 2 * live.height
+            cx += (fp.cx - live.cx).coerceIn(-maxX, maxX)
+            cy += (fp.cy - live.cy).coerceIn(-maxY, maxY)
+        }
+        return Box(cx, cy, live.width * CAPTURE_MARGIN, live.height * CAPTURE_MARGIN)
+    }
+
+    /**
+     * Virtual camera view for an output frame (computed once per frame), or null for the flat
+     * crop. Where the corrected view would need pixels outside the stored capture window or
+     * the sensor (the outer side of an off-axis view is larger), the correction backs off
+     * just enough, and comes back gradually so the view never changes shape abruptly.
+     */
+    private fun homographyFor(out: LookaheadFramer.Output, slot: YuvRing.Slot): DoubleArray? {
+        val f = focalPx
+        if (f <= 0) return null
+        if (out.timestampNs == viewTs) return viewHomography
+        viewTs = out.timestampNs
+        val v = view?.takeIf { it.focalPx == f } ?: PerspectiveView(srcW, srcH, f).also { view = it }
+        val cap = slot.capture ?: return null
+        val l = max(cap.left, 0.0)
+        val t = max(cap.top, 0.0)
+        val r = min(cap.right, srcW.toDouble())
+        val b = min(cap.bottom, srcH.toDouble())
+        val region = Box((l + r) / 2, (t + b) / 2, r - l, b - t)
+        val fit = v.fittingStrength(out.crop, region, margin = 2.0)
+        viewStrength = min(fit, viewStrength + VIEW_STRENGTH_RISE)
+        viewHomography = v.homography(out.crop, viewStrength)
+        return viewHomography
     }
 
     /** Rolling shutter correction for the frame of [ts] (computed once per output frame). */
@@ -371,5 +430,8 @@ class RenderPipeline(
 
         /** Capture window size relative to the crop: room for the look-ahead path to deviate. */
         const val CAPTURE_MARGIN = 1.25
+
+        /** Per output frame: how fast the perspective correction returns after backing off. */
+        const val VIEW_STRENGTH_RISE = 0.02
     }
 }
