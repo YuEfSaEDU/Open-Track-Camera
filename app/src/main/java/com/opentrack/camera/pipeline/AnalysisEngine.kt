@@ -157,7 +157,7 @@ class AnalysisEngine(
     fun release() {
         released = true
         thread.quitSafely()
-        detectorExecutor.execute { neural?.close() }
+        // The detector belongs to the activity (shared with gallery processing): not closed here.
         detectorExecutor.shutdown()
     }
 

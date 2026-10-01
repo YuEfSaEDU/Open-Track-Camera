@@ -18,12 +18,17 @@ import com.opentrack.tracking.DetectionSource
  * [labels] or a custom model.
  */
 class AircraftDetector private constructor(private val detector: ObjectDetector) : AutoCloseable {
+    private var closed = false
 
     /**
      * Runs detection on [bitmap], an image of the source [region] (source px; the whole frame
      * or a zoomed part of it). Boxes are returned in source pixels.
      */
+    @Synchronized
     fun detect(bitmap: Bitmap, timestampNs: Long, region: Box): List<Detection> {
+        // One instance serves the live pipeline and gallery processing in turn; calls are
+        // serialized and a closed detector just reports nothing.
+        if (closed) return emptyList()
         val result = detector.detect(BitmapImageBuilder(bitmap).build())
         val kx = region.width / bitmap.width
         val ky = region.height / bitmap.height
@@ -42,7 +47,12 @@ class AircraftDetector private constructor(private val detector: ObjectDetector)
         }
     }
 
-    override fun close() = detector.close()
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        detector.close()
+    }
 
     companion object {
         const val MODEL = "models/efficientdet_lite0.tflite"

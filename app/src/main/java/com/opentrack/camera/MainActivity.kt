@@ -27,6 +27,7 @@ import com.opentrack.camera.camera.CameraProfile
 import com.opentrack.camera.camera.CameraReport
 import com.opentrack.camera.camera.CameraSettings
 import com.opentrack.camera.camera.VendorKeys
+import com.opentrack.camera.diag.CrashLog
 import com.opentrack.camera.offline.VideoProcessor
 import com.opentrack.camera.detect.AircraftDetector
 import com.opentrack.camera.pipeline.AnalysisEngine
@@ -57,6 +58,24 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recordButton: Button
 
     private var profile: CameraProfile? = null
+    /**
+     * One neural detector for the activity's lifetime. Creating a new GPU detector while the
+     * previous one was still being closed on another thread (pipeline restart, gallery
+     * processing) is the suspected cause of crashes on Honor; it is now created once.
+     */
+    private var detector: AircraftDetector? = null
+    private var detectorTried = false
+    /** Why the app last died (see [CrashLog]), included in the camera report. */
+    private var lastCrash: String? = null
+
+    private fun sharedDetector(): AircraftDetector? {
+        if (!detectorTried) {
+            detectorTried = true
+            detector = AircraftDetector.create(this)
+            if (detector == null) Toast.makeText(this, R.string.no_neural, Toast.LENGTH_SHORT).show()
+        }
+        return detector
+    }
     /** Gallery video being processed (the camera is closed meanwhile). */
     private var processor: VideoProcessor? = null
     private val pickVideo = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let { processVideo(it) } }
@@ -95,6 +114,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
+        lastCrash = CrashLog.last(this)
+        if (lastCrash != null) Toast.makeText(this, R.string.crash_recorded, Toast.LENGTH_LONG).show()
         setContentView(R.layout.activity_main)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.getInsetsController(window, window.decorView).apply {
@@ -200,6 +222,12 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
+    override fun onDestroy() {
+        processor?.cancel()
+        detector?.close()
+        super.onDestroy()
+    }
+
     private fun startPipeline() {
         if (pipeline != null || processor != null) return
         val manager = getSystemService(CameraManager::class.java)
@@ -237,8 +265,7 @@ class MainActivity : AppCompatActivity() {
             TrackerConfig.forSource(srcW, hasGyro = g.available).copy(autoAcquire = autoLock, imageSpaceSearch = true),
         )
         this.tracker = tracker
-        val detector = AircraftDetector.create(this)
-        if (detector == null) Toast.makeText(this, R.string.no_neural, Toast.LENGTH_SHORT).show()
+        val detector = sharedDetector()
 
         val analysisW = 640
         val analysisH = ((analysisW.toDouble() * srcH / srcW) / 2).roundToInt() * 2
@@ -337,7 +364,7 @@ class MainActivity : AppCompatActivity() {
     private fun processVideo(uri: android.net.Uri) {
         stopPipeline()
         status.text = getString(R.string.processing, 0, 0.0)
-        val p = VideoProcessor(applicationContext, uri, zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) }, object : VideoProcessor.Listener {
+        val p = VideoProcessor(applicationContext, uri, sharedDetector(), zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) }, object : VideoProcessor.Listener {
             override fun onProgress(fraction: Double, processingFps: Double) = runOnUiThread {
                 status.text = getString(R.string.processing, (fraction * 100).roundToInt(), processingFps)
             }
@@ -362,7 +389,7 @@ class MainActivity : AppCompatActivity() {
     /** Shares what the camera stack offers to this app, to see where 4K60 went. */
     private fun shareCameraReport() {
         val text = runCatching {
-            "Üretici deneyi: ${if (prefs.getBoolean(PREF_VENDOR, false)) "açık (" + VendorKeys.lastLog + ")" else "kapalı"}, " +
+            (lastCrash?.let { "$it\n\n" } ?: "") + "Üretici deneyi: ${if (prefs.getBoolean(PREF_VENDOR, false)) "açık (" + VendorKeys.lastLog + ")" else "kapalı"}, " +
                 "ölçülen fps: ${"%.1f".format(lastMeasuredFps)}\n" + CameraReport.build(getSystemService(CameraManager::class.java), profile)
         }.getOrElse { it.stackTraceToString() }
         val send = Intent(Intent.ACTION_SEND).setType("text/plain")

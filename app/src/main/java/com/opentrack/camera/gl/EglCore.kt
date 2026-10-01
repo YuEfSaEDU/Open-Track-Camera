@@ -93,7 +93,8 @@ class EglCore {
         EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
         EGL14.eglDestroyContext(display, context)
         EGL14.eglReleaseThread()
-        EGL14.eglTerminate(display)
+        // No eglTerminate: the default display is shared by the whole process (the next
+        // pipeline, gallery processing, the detector's GPU delegate).
     }
 
     private companion object {

@@ -48,4 +48,5 @@
     <string name="processing_done">Movies/OpenTrack klasörüne kaydedildi</string>
     <string name="processing_failed">İşleme başarısız: %s</string>
     <string name="processing_cancelled">İşleme iptal edildi</string>
+    <string name="crash_recorded">Uygulama geçen sefer beklenmedik şekilde kapandı. Lütfen kamera raporunu paylaşın.</string>
 </resources>
