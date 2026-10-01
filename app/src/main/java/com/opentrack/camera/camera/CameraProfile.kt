@@ -24,6 +24,8 @@ data class CameraProfile(
     val exposureRangeNs: Range<Long>?,
     val isoRange: Range<Int>?,
     val aeCompensationRange: Range<Int>,
+    /** EV per auto exposure compensation step (often 1/3 or 1/6). */
+    val aeCompensationStep: Double,
     val timestampRealtime: Boolean,
     val hasOis: Boolean,
     /**
@@ -154,6 +156,7 @@ data class CameraProfile(
                 exposureRangeNs = c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE),
                 isoRange = c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE),
                 aeCompensationRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(0, 0),
+                aeCompensationStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toDouble()?.takeIf { it > 0 } ?: (1.0 / 3),
                 timestampRealtime = c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
                     CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME,
                 hasOis = ois,

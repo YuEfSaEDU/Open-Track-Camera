@@ -14,6 +14,7 @@ import android.hardware.camera2.params.SessionConfiguration
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import com.opentrack.tracking.ShutterPriorityExposure
@@ -21,6 +22,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * Camera2 wrapper with a single output (the render pipeline's SurfaceTexture). All camera
@@ -52,6 +54,10 @@ class CameraController(
     // Last auto-exposure values, used to derive ISO for shutter priority.
     @Volatile private var lastAutoExposureNs = 0L
     @Volatile private var lastAutoIso = 0
+    /** The latest automatic exposure frame was settled (converged or locked). */
+    @Volatile private var aeSettled = false
+    /** When automatic exposure was first requested (elapsed realtime ns), 0 = not yet. */
+    private var autoSinceNs = 0L
 
     @SuppressLint("MissingPermission")
     fun open(target: Surface) {
@@ -148,7 +154,8 @@ class CameraController(
         // Shutter priority, once auto exposure has shown how bright the scene should be.
         // High-speed sessions only honor automatic exposure (and 1/120 s is short already).
         val manual = !profile.highSpeed && wantsShutterPriority(s) && exp != null && iso != null && ae != null &&
-            lastAutoExposureNs > 0 && ae.targetLuma != null
+            lastAutoExposureNs > 0 && ae.ready
+        ae?.ev = s.evThirds / 3.0
         if (manual && exp != null) {
             val shutter = s.shutterNs.coerceIn(exp.lower, minOf(exp.upper, 1_000_000_000L / profile.fps))
             if (!manualActive || shutter != manualShutterNs) ae!!.start(lastAutoIso, lastAutoExposureNs, shutter)
@@ -163,7 +170,11 @@ class CameraController(
         } else {
             manualActive = false
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
-            b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, s.aeCompensation.coerceIn(profile.aeCompensationRange.lower, profile.aeCompensationRange.upper))
+            if (autoSinceNs == 0L) autoSinceNs = SystemClock.elapsedRealtimeNanos()
+            // While auto exposure only teaches shutter priority its brightness, keep it neutral
+            // (the user's EV is applied on top of what it learns); otherwise it is the EV.
+            val steps = if (wantsShutterPriority(s) && !profile.highSpeed) 0 else (s.evThirds / 3.0 / profile.aeCompensationStep).roundToInt()
+            b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, steps.coerceIn(profile.aeCompensationRange.lower, profile.aeCompensationRange.upper))
             b.set(CaptureRequest.CONTROL_AE_LOCK, s.aeLock)
         }
 
@@ -203,9 +214,15 @@ class CameraController(
             val shot = shotSettings(timestampNs) ?: return@post
             if (e.update(mean, shot.second, shot.first)) applySettings(settings)
         } else {
-            e.observeAuto(mean)
-            // Shutter priority was requested before auto exposure had settled: switch now.
-            if (wantsShutterPriority(settings) && !profile.highSpeed && lastAutoExposureNs > 0) applySettings(settings)
+            // Learn only from settled auto exposure: right after the camera opens the frames are
+            // far too dark, and taking over from those made the whole recording dark.
+            // (Only while its compensation is neutral, i.e. shutter priority is wanted: with the
+            // shutter on auto it applies the user's EV, which would then count twice.)
+            if (wantsShutterPriority(settings) && !profile.highSpeed && lastAutoExposureNs > 0) {
+                if (aeSettled) e.observeAuto(mean)
+                if (!e.ready && autoSinceNs > 0 && SystemClock.elapsedRealtimeNanos() - autoSinceNs > AE_SETTLE_TIMEOUT_NS) e.useDefaultTarget()
+                if (e.ready) applySettings(settings)
+            }
         }
     }
 
@@ -245,6 +262,10 @@ class CameraController(
                 shotNext = (shotNext + 1) % SHOT_HISTORY
             }
             if (result.get(CaptureResult.CONTROL_AE_MODE) != CameraMetadata.CONTROL_AE_MODE_OFF) {
+                aeSettled = when (result.get(CaptureResult.CONTROL_AE_STATE)) {
+                    CameraMetadata.CONTROL_AE_STATE_CONVERGED, CameraMetadata.CONTROL_AE_STATE_LOCKED, CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED -> true
+                    else -> false
+                }
                 lastAutoExposureNs = exposure
                 lastAutoIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: lastAutoIso
             }
@@ -268,6 +289,9 @@ class CameraController(
 
     private companion object {
         const val TAG = "CameraController"
+
+        /** Without a settled auto exposure report by then, shutter priority aims for middle grey. */
+        const val AE_SETTLE_TIMEOUT_NS = 3_000_000_000L
 
         /** Capture results remembered for matching analysis frames (~0.5 s at 60 fps). */
         const val SHOT_HISTORY = 32

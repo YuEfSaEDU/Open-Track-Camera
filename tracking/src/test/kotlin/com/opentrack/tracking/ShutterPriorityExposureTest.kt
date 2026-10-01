@@ -121,4 +121,33 @@ class ShutterPriorityExposureTest {
         assertEquals(2_000_000L, e)
         assertEquals(110.0, luma(indoor, e, i), 110.0 * 0.06)
     }
+
+    @Test
+    fun waitsForSettledAutoExposureAndFollowsTheUsersEv() {
+        val ae = ShutterPriorityExposure(100, 6400, minExposureNs = 10_000)
+        assertFalse(ae.ready)
+        repeat(ShutterPriorityExposure.MIN_OBSERVATIONS - 1) { ae.observeAuto(120.0) }
+        assertFalse(ae.ready) // one settled frame is not enough (the reported "too dark" start)
+        ae.observeAuto(120.0)
+        assertTrue(ae.ready)
+        // EV +1 aims for twice the light, EV -1 for half: the exposure follows.
+        val light = 2.0
+        ae.start(100, 10_000_000, 2_000_000)
+        ae.ev = 1.0
+        repeat(40) { ae.update(luma(light, ae.exposureNs, ae.iso), ae.iso, ae.exposureNs) }
+        val plus = ae.iso.toDouble() * ae.exposureNs
+        ae.ev = -1.0
+        repeat(40) { ae.update(luma(light, ae.exposureNs, ae.iso), ae.iso, ae.exposureNs) }
+        val minus = ae.iso.toDouble() * ae.exposureNs
+        assertEquals(4.0, plus / minus, 0.6) // two stops apart (within the dead band)
+        assertEquals(ae.aimLuma!!, luma(light, ae.exposureNs, ae.iso), ae.aimLuma!! * 0.06)
+    }
+
+    @Test
+    fun defaultsToMiddleGreyWhenAutoExposureNeverSettles() {
+        val ae = ShutterPriorityExposure(100, 6400)
+        ae.useDefaultTarget()
+        assertTrue(ae.ready)
+        assertEquals(ShutterPriorityExposure.MIDDLE_GREY_LUMA, ae.targetLuma!!, 1e-9)
+    }
 }

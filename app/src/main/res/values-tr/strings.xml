@@ -25,7 +25,7 @@
     <string name="zoom_min">Min %s</string>
     <string name="zoom_max">Maks %s</string>
     <string name="lens_zoom">Lens %.1fx</string>
-    <string name="ev">EV %+d</string>
+    <string name="ev">EV %+.1f</string>
     <string name="state_idle">BEKLİYOR</string>
     <string name="state_tracking">TAKİPTE</string>
     <string name="state_coasting">TAHMİN</string>

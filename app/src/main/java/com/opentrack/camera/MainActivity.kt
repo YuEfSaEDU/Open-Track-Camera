@@ -479,13 +479,13 @@ class MainActivity : AppCompatActivity() {
 
         val ev = findViewById<SeekBar>(R.id.ev)
         val evLabel = findViewById<TextView>(R.id.evLabel)
-        val evMin = p.aeCompensationRange.lower
-        ev.max = p.aeCompensationRange.upper - evMin
-        ev.progress = settings.aeCompensation - evMin
-        evLabel.text = getString(R.string.ev, settings.aeCompensation)
+        // −3..+3 EV in thirds of a stop.
+        ev.max = 18
+        ev.progress = settings.evThirds + 9
+        evLabel.text = getString(R.string.ev, settings.evThirds / 3.0)
         ev.setOnSeekBarChangeListener(onChange { v ->
-            evLabel.text = getString(R.string.ev, evMin + v)
-            updateSettings(settings.copy(aeCompensation = evMin + v))
+            evLabel.text = getString(R.string.ev, (v - 9) / 3.0)
+            updateSettings(settings.copy(evThirds = v - 9))
         })
     }
 

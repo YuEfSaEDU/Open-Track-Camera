@@ -35,6 +35,40 @@ class ShutterPriorityExposure(
     var targetLuma: Double? = null
         private set
 
+    /** Settled auto exposure frames observed so far. */
+    var observations = 0
+        private set
+
+    private var defaulted = false
+
+    /** Enough of the settled auto exposure has been seen to take over (see [observeAuto]). */
+    val ready: Boolean get() = targetLuma != null && (observations >= MIN_OBSERVATIONS || defaulted)
+
+    /** Brightness offset chosen by the user, in EV (stops): +1 = twice the light. */
+    var ev: Double = 0.0
+
+    /** The brightness aimed for: the learned one moved by [ev] (luma is gamma ~2.2 encoded). */
+    val aimLuma: Double? get() = targetLuma?.let { (it * Math.pow(2.0, ev / 2.2)).coerceIn(8.0, 235.0) }
+
+    /**
+     * Auto exposure is running and has settled (call only for such frames: while it is still
+     * converging, e.g. right after the camera opened, frames are much too dark): learn its
+     * brightness (slow average, ignores single frames).
+     */
+    fun observeAuto(meanLuma: Double) {
+        val t = targetLuma
+        targetLuma = if (t == null || defaulted) meanLuma else t + (meanLuma - t) * 0.1
+        defaulted = false
+        observations++
+    }
+
+    /** Auto exposure never reported settling: aim for middle grey. */
+    fun useDefaultTarget() {
+        if (targetLuma != null && observations > 0) return
+        targetLuma = MIDDLE_GREY_LUMA
+        defaulted = true
+    }
+
     var iso: Int = isoMin
         private set
 
@@ -44,12 +78,6 @@ class ShutterPriorityExposure(
 
     /** The chosen shutter time: the longest exposure used (motion blur limit). */
     private var maxExposureNs: Long = 0L
-
-    /** Auto exposure is running: learn its brightness (slow average, ignores single frames). */
-    fun observeAuto(meanLuma: Double) {
-        val t = targetLuma
-        targetLuma = if (t == null) meanLuma else t + (meanLuma - t) * 0.1
-    }
 
     /** Entering shutter priority: same light as the last auto frame, at the new exposure time. */
     fun start(autoIso: Int, autoExposureNs: Long, shutterNs: Long) {
@@ -64,7 +92,7 @@ class ShutterPriorityExposure(
      * new capture request.
      */
     fun update(meanLuma: Double, frameIso: Int, frameExposureNs: Long): Boolean {
-        val target = targetLuma ?: return false
+        val target = aimLuma ?: return false
         if (maxExposureNs <= 0 || frameIso <= 0 || frameExposureNs <= 0) return false
         // A black (or white) frame still says which way to go: clamp instead of ignoring it.
         val ratio = target / meanLuma.coerceIn(2.0, 253.0)
@@ -92,6 +120,12 @@ class ShutterPriorityExposure(
     }
 
     companion object {
+        /** Settled auto exposure frames to learn from before taking over (~1 s at 10 Hz). */
+        const val MIN_OBSERVATIONS = 10
+
+        /** 18% grey in sRGB. */
+        const val MIDDLE_GREY_LUMA = 118.0
+
         /** Mean luma of an 8-bit frame, sampling every [step]-th pixel in both directions. */
         fun meanLuma(frame: LumaFrame, step: Int = 4): Double {
             var sum = 0L

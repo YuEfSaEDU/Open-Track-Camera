@@ -28,7 +28,7 @@
     <string name="zoom_limit" translatable="false">%.2fx</string>
     <string name="zoom_limit_upscaled" translatable="false">%.2fx ⚠</string>
     <string name="lens_zoom">Lens %.1fx</string>
-    <string name="ev">EV %+d</string>
+    <string name="ev">EV %+.1f</string>
     <string name="state_idle">IDLE</string>
     <string name="state_tracking">TRACKING</string>
     <string name="state_coasting">PREDICTING</string>

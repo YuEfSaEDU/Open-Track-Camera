@@ -47,7 +47,9 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   parlaklığını koruyacak şekilde sürekli ayarlanır; stabilize kırpmada kare içi hareket bulanıklığını önler.
   Seçilen enstantane bir üst sınırdır: ISO en altta (ör. 100) olduğu halde görüntü hâlâ parlaksa
   enstantane kısalır (1/1000, 1/2000…), ışık azalınca önce seçilen değere döner, ISO sonra yükselir.
-  OIS açık / kamera EIS kapalı.
+  Hedef parlaklık, kameranın otomatik pozlaması oturduktan sonra öğrenilir (oturmazsa orta gri) ve
+  **EV kaydırıcısıyla −3…+3 (1/3 adım)** kaydırılır; enstantane "oto" iken EV kameranın pozlama
+  telafisidir. OIS açık / kamera EIS kapalı.
 - **Otomatik zoom**: kullanıcının belirlediği min/max sınırlar içinde hedefi çıkışta sabit boyutta
   tutar; hedef yalnızca tahminle izlenirken veya kadrajın kenarına kayarken genişler, hedef yokken
   en geniş sınıra döner (yeniden yakalamak için). Ölü bölge ve hız sınırlarıyla "nefes alma" yapmaz.
