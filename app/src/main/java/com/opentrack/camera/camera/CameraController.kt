@@ -158,12 +158,14 @@ class CameraController(
         ae?.ev = s.evThirds / 3.0
         if (manual && exp != null) {
             val shutter = s.shutterNs.coerceIn(exp.lower, minOf(exp.upper, 1_000_000_000L / profile.fps))
-            if (!manualActive || shutter != manualShutterNs) ae!!.start(lastAutoIso, lastAutoExposureNs, shutter)
+            // In the dark the time may grow to half the frame interval (1/120 s at 60 fps).
+            val longest = maxOf(shutter, minOf(exp.upper, 1_000_000_000L / (2L * profile.fps)))
+            if (!manualActive || shutter != manualShutterNs) ae!!.start(lastAutoIso, lastAutoExposureNs, shutter, longest)
             manualActive = true
             manualShutterNs = shutter
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
-            // ISO first; the chosen shutter time is a ceiling, shortened only when ISO is at
-            // its minimum and the scene is still too bright.
+            // See ShutterPriorityExposure: the chosen time is preferred; shorter in bright light
+            // at minimum ISO, longer in the dark once ISO reaches its noise limit.
             b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, ae!!.exposureNs)
             b.set(CaptureRequest.SENSOR_SENSITIVITY, ae.iso)
             b.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / profile.fps)

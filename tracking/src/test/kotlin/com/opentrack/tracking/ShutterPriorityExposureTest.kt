@@ -150,4 +150,27 @@ class ShutterPriorityExposureTest {
         assertTrue(ae.ready)
         assertEquals(ShutterPriorityExposure.MIDDLE_GREY_LUMA, ae.targetLuma!!, 1e-9)
     }
+
+    @Test
+    fun lengthensTheShutterInTheDarkBeforeIsoGetsNoisy() {
+        // Chosen 1/500 s, longest 1/120 s (60 fps). Dim light: ISO rises to 800 at 1/500 s,
+        // then the time gets longer up to 1/120 s, and only then ISO rises further.
+        val ae = ShutterPriorityExposure(100, 6400, minExposureNs = 10_000)
+        repeat(10) { ae.observeAuto(118.0) }
+        ae.start(100, 2_000_000, 2_000_000, longestNs = 8_333_333)
+        fun settle(light: Double) = repeat(60) { ae.update(luma(light, ae.exposureNs, ae.iso), ae.iso, ae.exposureNs) }
+        // Luma 118 needs light × ISO × seconds = 0.183: at light 0.183, ISO 500 at 1/500 s.
+        settle(0.183)
+        assertEquals(2_000_000L, ae.exposureNs)
+        assertEquals(500.0, ae.iso.toDouble(), 50.0)
+        // 4x darker: ISO 800 and ~1/240 s instead of ISO 2000 at 1/500 s.
+        settle(0.183 / 4)
+        assertEquals(800, ae.iso)
+        assertEquals(5_000_000.0, ae.exposureNs.toDouble(), 500_000.0)
+        // 16x darker than the start: 1/120 s, ISO ~1600.
+        settle(0.183 / 16)
+        assertEquals(8_333_333L, ae.exposureNs)
+        assertEquals(1920.0, ae.iso.toDouble(), 200.0)
+        assertEquals(118.0, luma(0.183 / 16, ae.exposureNs, ae.iso), 118.0 * 0.06)
+    }
 }

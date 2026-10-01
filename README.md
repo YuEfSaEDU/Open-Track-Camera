@@ -45,8 +45,9 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
 - **Uçak fotoğrafçılığı ayarları**: sonsuza sabit odak (gökyüzünde AF aramasını önler), EV,
   enstantane önceliği (oto, 1/250–1/2000 s; varsayılan 1/500) — ISO, kameranın otomatik pozlamasının
   parlaklığını koruyacak şekilde sürekli ayarlanır; stabilize kırpmada kare içi hareket bulanıklığını önler.
-  Seçilen enstantane bir üst sınırdır: ISO en altta (ör. 100) olduğu halde görüntü hâlâ parlaksa
-  enstantane kısalır (1/1000, 1/2000…), ışık azalınca önce seçilen değere döner, ISO sonra yükselir.
+  Seçilen enstantane tercih edilen değerdir: ISO en altta (ör. 100) olduğu halde görüntü hâlâ parlaksa
+  enstantane kısalır (1/1000, 1/2000…); karanlıkta ISO 800'e varınca (gürültü) enstantane kare
+  süresinin yarısına kadar uzar (60 fps'te 1/120), ancak ondan sonra ISO yükselmeye devam eder.
   Hedef parlaklık, kameranın otomatik pozlaması oturduktan sonra öğrenilir (oturmazsa orta gri) ve
   **EV kaydırıcısıyla −3…+3 (1/3 adım)** kaydırılır; enstantane "oto" iken EV kameranın pozlama
   telafisidir. OIS açık / kamera EIS kapalı.

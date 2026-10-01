@@ -7,7 +7,7 @@
     <string name="release_target">Hedefi bırak</string>
     <string name="focus_inf_on">Odak: ∞</string>
     <string name="focus_inf_off">Odak: otomatik</string>
-    <string name="shutter_fixed">Enstantane: ≤1/%d</string>
+    <string name="shutter_fixed">Enstantane: ~1/%d</string>
     <string name="shutter_auto">Enstantane: oto</string>
     <string name="detector_hybrid">Dedektör: hibrit</string>
     <string name="detector_neural">Dedektör: sinir ağı</string>

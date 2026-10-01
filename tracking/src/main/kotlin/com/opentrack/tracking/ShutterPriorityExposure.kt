@@ -15,9 +15,15 @@ import kotlin.math.ln
  * towards that brightness in damped, rate-limited steps (no flicker, no pumping on a passing
  * cloud). Each measurement is judged against the ISO and time that frame was actually taken
  * with, so the camera's settings latency (several frames) cannot make the loop overshoot or
- * oscillate: the required exposure is computed, not integrated from stale errors. ISO moves first; the chosen shutter time is a ceiling: only when ISO is already at
- * its minimum and the scene is still too bright (bright sun at 1/500 s) does the exposure time
- * get shorter, and it returns to the chosen time before ISO rises again. Pure logic, no Android.
+ * oscillate: the required exposure is computed, not integrated from stale errors.
+ *
+ * The chosen shutter time is preferred, not fixed. From bright to dark:
+ * 1. ISO at its minimum and still too bright (sun at 1/500 s): the time gets shorter.
+ * 2. The chosen time, ISO rising up to [isoSoftMax].
+ * 3. ISO held at [isoSoftMax] (noise), the time gets longer up to the longest allowed (half the
+ *    frame interval, e.g. 1/120 s at 60 fps).
+ * 4. Longest time, ISO rising to its maximum.
+ * The split is continuous, so the exposure never jumps between the stages. Pure logic, no Android.
  */
 class ShutterPriorityExposure(
     private val isoMin: Int,
@@ -30,6 +36,8 @@ class ShutterPriorityExposure(
     private val deadband: Double = 0.04,
     /** Shortest exposure time the sensor supports (ns). */
     private val minExposureNs: Long = 1_000L,
+    /** ISO beyond which a longer exposure time (up to the longest allowed) is preferred to more noise. */
+    private val isoSoftMax: Int = 800,
 ) {
     /** Brightness (mean luma, 0..255) auto exposure produced; null until observed. */
     var targetLuma: Double? = null
@@ -76,12 +84,16 @@ class ShutterPriorityExposure(
     var exposureNs: Long = 0L
         private set
 
-    /** The chosen shutter time: the longest exposure used (motion blur limit). */
+    /** The chosen (preferred) shutter time. */
+    private var preferredExposureNs: Long = 0L
+
+    /** The longest exposure time allowed (motion blur limit, e.g. 1/120 s at 60 fps). */
     private var maxExposureNs: Long = 0L
 
     /** Entering shutter priority: same light as the last auto frame, at the new exposure time. */
-    fun start(autoIso: Int, autoExposureNs: Long, shutterNs: Long) {
-        maxExposureNs = shutterNs
+    fun start(autoIso: Int, autoExposureNs: Long, shutterNs: Long, longestNs: Long = shutterNs) {
+        preferredExposureNs = shutterNs
+        maxExposureNs = maxOf(shutterNs, longestNs)
         val total = if (autoIso > 0 && autoExposureNs > 0) autoIso.toDouble() * autoExposureNs else isoMin.toDouble() * shutterNs
         allocate(total)
     }
@@ -108,14 +120,27 @@ class ShutterPriorityExposure(
         return iso != oldIso || abs(exposureNs - oldExposure) > oldExposure * 0.01
     }
 
-    /** Splits a total exposure (ISO × ns) into ISO first, then a shorter time below minimum ISO. */
+    /** Splits a total exposure (ISO × ns) into ISO and time, following the stages above. */
     private fun allocate(total: Double) {
-        if (total >= isoMin.toDouble() * maxExposureNs) {
-            exposureNs = maxExposureNs
-            iso = (total / maxExposureNs).toInt().coerceIn(isoMin, isoMax)
-        } else {
-            iso = isoMin
-            exposureNs = (total / isoMin).toLong().coerceIn(minOf(minExposureNs, maxExposureNs), maxExposureNs)
+        val pref = preferredExposureNs.toDouble()
+        val soft = isoSoftMax.coerceIn(isoMin, isoMax).toDouble()
+        when {
+            total < isoMin * pref -> {
+                iso = isoMin
+                exposureNs = (total / isoMin).toLong().coerceIn(minOf(minExposureNs, preferredExposureNs), preferredExposureNs)
+            }
+            total <= soft * pref -> {
+                exposureNs = preferredExposureNs
+                iso = (total / pref).toInt().coerceIn(isoMin, isoMax)
+            }
+            total <= soft * maxExposureNs -> {
+                iso = soft.toInt()
+                exposureNs = (total / soft).toLong().coerceIn(preferredExposureNs, maxExposureNs)
+            }
+            else -> {
+                exposureNs = maxExposureNs
+                iso = (total / maxExposureNs).toInt().coerceIn(isoMin, isoMax)
+            }
         }
     }
 
