@@ -405,12 +405,16 @@ class TargetTracker(
                 val z = toWorld(point, t)
                 measurement = z
                 measurementNs = t
-                val r = (config.detectionStdFraction * max(box.width, box.height)).let { it * it }
-                fx.update(z.x, r)
-                fy.update(z.y, r)
+                // The track point moves to the aircraft outright, keeping the velocity: the old
+                // point was wrong (smoke trail, coasting drift), the aircraft did not jump. A
+                // partial filter update would leave a lag that the next frame's image-space
+                // match turns into a fake camera-pose correction (a jump of the whole view),
+                // and its innovation would spike the velocity that framing feeds forward.
+                fx.moveTo(z.x)
+                fy.moveTo(z.y)
                 template.init(frame, box.movedTo(point).scaled(1 / s))
                 // The image-space search continues from here (not from the stale last match).
-                if (lastImageNs != Long.MIN_VALUE && t > lastImageNs && t - lastImageNs < 250_000_000L) {
+                if (!measured && lastImageNs != Long.MIN_VALUE && t > lastImageNs && t - lastImageNs < 250_000_000L) {
                     imageVelocity = (point - lastImage) / ((t - lastImageNs) * 1e-9)
                 }
                 lastImage = point

@@ -204,9 +204,7 @@ class LookaheadFramer(
             val eis = pose.toWorld(center, center)
             if (t != null && t.hasTarget) {
                 val e = smoothstep(r.engagement)
-                val measured = t.measuredWorld
-                // Stabilize on the tracking point, center the aircraft (point + center offset).
-                val q = (if (c.lockToPoint && measured != null && t.timestampNs == r.ts) measured else t.worldAt(r.ts)) + t.centerOffset
+                val q = goalPoint(t, r.ts)
                 var lead = t.velocity * c.leadTimeS
                 val maxLead = c.maxLeadFraction * r.cropW / 2
                 if (lead.length() > maxLead) lead = lead * (maxLead / lead.length())
@@ -279,23 +277,30 @@ class LookaheadFramer(
         val c = config
         var e = window[0].engagement
         var prevTs = window[0].ts
-        var prev: TrackPrediction? = window[0].track?.takeIf { it.hasTarget }
+        var prev: Vec2? = window[0].track?.takeIf { it.hasTarget }?.let { goalPoint(it, window[0].ts) }
         for (k in 1 until window.size) {
             val r = window[k]
             val dt = ((r.ts - prevTs) * 1e-9).coerceIn(0.0, 0.1)
             prevTs = r.ts
             val t = r.track
             if (t != null && t.hasTarget) {
-                val p = prev
+                val p = prev?.let { it + t.velocity * dt }
                 // A jump (a switch to another object, or a re-seed that moved the track) glides too.
-                if (p != null && (t.framingAt(r.ts) - p.framingAt(r.ts)).length() > c.maxTargetOffset * min(r.cropW, r.cropH) / 2) e = 0.0
+                val q = goalPoint(t, r.ts)
+                if (p != null && (q - p).length() > c.maxTargetOffset * min(r.cropW, r.cropH) / 2) e = 0.0
                 e = if (c.acquireS > 0) min(1.0, e + dt / c.acquireS) else 1.0
-                prev = t
+                prev = q
             } else {
                 e = if (c.releaseS > 0) max(0.0, e - dt / c.releaseS) else 0.0
             }
             r.engagement = e
         }
+    }
+
+    /** Where the target goal is on frame [ts]: the tracking point (as measured on that frame when locking to it) moved to the aircraft's center. */
+    private fun goalPoint(t: TrackPrediction, ts: Long): Vec2 {
+        val measured = t.measuredWorld
+        return (if (config.lockToPoint && measured != null && t.timestampNs == ts) measured else t.worldAt(ts)) + t.centerOffset
     }
 
     /** Largest crop rotation for this frame that still fits in the sensor and capture window. */

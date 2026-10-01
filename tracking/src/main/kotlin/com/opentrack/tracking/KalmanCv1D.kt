@@ -51,6 +51,11 @@ class KalmanCv1D(var accelNoise: Double) {
         p11 *= factor * factor
     }
 
+    /** Moves the estimate to [position] (the tracked point was re-placed), keeping velocity and uncertainty. */
+    fun moveTo(position: Double) {
+        this.position = position
+    }
+
     /** Fuses a position measurement with variance [measurementVariance]. Returns the innovation. */
     fun update(measurement: Double, measurementVariance: Double): Double {
         val innovation = measurement - position
