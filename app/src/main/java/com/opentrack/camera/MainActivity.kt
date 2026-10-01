@@ -32,6 +32,7 @@ import com.opentrack.camera.diag.CrashLog
 import com.opentrack.camera.diag.Telemetry
 import com.opentrack.camera.offline.VideoProcessor
 import com.opentrack.camera.detect.DetectorHost
+import com.opentrack.camera.detect.DetectorModel
 import com.opentrack.camera.detect.TargetClasses
 import com.opentrack.camera.pipeline.AnalysisEngine
 import com.opentrack.camera.pipeline.OverlayState
@@ -114,6 +115,9 @@ class MainActivity : AppCompatActivity() {
     private var autoLock = true
     private var detectorMode = AnalysisEngine.Mode.HYBRID
     private var targetClasses = TargetClasses.AIRCRAFT
+    /** Use the COCO model for aircraft too (compare with the own model). */
+    private var preferCoco = false
+    private val detectorModel get() = DetectorModel.forTarget(targetClasses, preferCoco)
     private var outputWidth = 1920
     private var outputHeight = 1080
     /** Output long side for 4K-class sources: 1920 (1080p) or 2560 (1440p). */
@@ -130,6 +134,7 @@ class MainActivity : AppCompatActivity() {
         detectorMode = AnalysisEngine.Mode.entries.firstOrNull { it.name == prefs.getString(PREF_DETECTOR, null) } ?: detectorMode
         targetClasses = TargetClasses.entries.firstOrNull { it.name == prefs.getString(PREF_TARGET, null) } ?: targetClasses
         outputLongSide = prefs.getInt(PREF_OUTPUT, 1920)
+        preferCoco = prefs.getBoolean(PREF_COCO, false)
         codec = VideoCodec.entries.firstOrNull { it.name == prefs.getString(PREF_CODEC, null) } ?: codec
         lastVideo = prefs.getString(PREF_LAST_VIDEO, null)?.toUri()
         lastCrash = CrashLog.last(this)
@@ -183,6 +188,7 @@ class MainActivity : AppCompatActivity() {
             val all = TargetClasses.entries
             targetClasses = all[(targetClasses.ordinal + 1) % all.size]
             analysis?.targetClasses = targetClasses
+            analysis?.model = detectorModel
             prefs.edit { putString(PREF_TARGET, targetClasses.name) }
             refreshButtons()
         }
@@ -206,6 +212,12 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.resolution).setOnClickListener { cycleResolution() }
         findViewById<Button>(R.id.lens).setOnClickListener { cycleLens() }
+        findViewById<Button>(R.id.model).setOnClickListener {
+            preferCoco = !preferCoco
+            prefs.edit { putBoolean(PREF_COCO, preferCoco) }
+            analysis?.model = detectorModel
+            refreshButtons()
+        }
         findViewById<Button>(R.id.codec).setOnClickListener {
             if (recorder?.isRecording == true) return@setOnClickListener
             val all = VideoCodec.entries
@@ -337,6 +349,7 @@ class MainActivity : AppCompatActivity() {
         val engine = AnalysisEngine(tracker, detector, visual, motion, analysisW, analysisH, srcW.toDouble() / analysisW).also {
             it.mode = detectorMode
             it.targetClasses = targetClasses
+            it.model = detectorModel
             it.outputWidth = outputWidth
             it.onSceneLuma = { m, ts, blur -> camera?.onSceneLuma(m, ts, blur) }
         }
@@ -517,7 +530,7 @@ class MainActivity : AppCompatActivity() {
         status.text = getString(R.string.processing, 0, 0.0)
         val p = VideoProcessor(
             applicationContext, uri, sharedDetector(), zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) },
-            targetClasses.labels, detectorMode != AnalysisEngine.Mode.NEURAL_ONLY, outputLongSide, codec,
+            targetClasses.labels, detectorModel, detectorMode != AnalysisEngine.Mode.NEURAL_ONLY, outputLongSide, codec,
             object : VideoProcessor.Listener {
             override fun onProgress(fraction: Double, processingFps: Double) = runOnUiThread {
                 status.text = getString(R.string.processing, (fraction * 100).roundToInt(), processingFps) + " · " + (detector?.shortStatus() ?: "NN -")
@@ -770,7 +783,7 @@ class MainActivity : AppCompatActivity() {
         val line = t.line("set").i("shutterNs", settings.shutterNs).n("ev", settings.evThirds / 3.0, 2).b("focusInf", settings.focusInfinity)
             .n("cameraZoom", settings.zoomRatio.toDouble(), 2).b("ois", settings.ois).s("stab", stabPreset.name).b("horizon", horizonLock)
             .b("autoZoom", zoomConfig.auto).n("zoomMin", zoomConfig.minZoom, 2).n("zoomMax", zoomConfig.maxZoom, 2).n("cropZoom", cropZoom, 2)
-            .s("detector", detectorMode.name).s("target", targetClasses.name).b("autoLock", autoLock).s("view", previewMode.name).s("codec", codec.name).i("outLong", outputLongSide)
+            .s("detector", detectorMode.name).s("target", targetClasses.name).s("model", detectorModel.name).b("autoLock", autoLock).s("view", previewMode.name).s("codec", codec.name).i("outLong", outputLongSide)
         // Only when something changed (the line without its timestamp is the comparison key).
         val key = line.toString()
         if (key == lastLoggedSettings) return
@@ -803,6 +816,12 @@ class MainActivity : AppCompatActivity() {
     private fun refreshButtons() {
         logSettings()
         findViewById<Button>(R.id.lens).text = lensLabel()
+        findViewById<Button>(R.id.model).setText(
+            when (detectorModel) {
+                DetectorModel.AIRCRAFT -> R.string.model_own
+                DetectorModel.COCO -> if (targetClasses == TargetClasses.VEHICLES) R.string.model_coco_vehicles else R.string.model_coco
+            },
+        )
         findViewById<Button>(R.id.codec).text = getString(R.string.codec, codecName(codec))
         findViewById<Button>(R.id.share).visibility = if (lastVideo != null) android.view.View.VISIBLE else android.view.View.GONE
         findViewById<Button>(R.id.ois).apply {
@@ -855,6 +874,7 @@ class MainActivity : AppCompatActivity() {
         const val PREF_DETECTOR = "detectorMode"
         const val PREF_TARGET = "targetClasses"
         const val PREF_LENS = "lens"
+        const val PREF_COCO = "preferCoco"
         const val PREF_CODEC = "codec"
         const val PREF_LAST_VIDEO = "lastVideo"
         const val PREF_OIS = "ois"

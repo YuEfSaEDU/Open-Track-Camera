@@ -7,6 +7,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import com.opentrack.camera.detect.DetectorHost
+import com.opentrack.camera.detect.DetectorModel
 import com.opentrack.camera.diag.Telemetry
 import com.opentrack.camera.detect.TargetClasses
 import com.opentrack.tracking.CameraMotion
@@ -53,6 +54,8 @@ class AnalysisEngine(
     @Volatile var mode = Mode.HYBRID
     /** Which neural classes may become targets. */
     @Volatile var targetClasses = TargetClasses.AIRCRAFT
+    /** Neural model (see [DetectorModel.forTarget]). */
+    @Volatile var model = DetectorModel.AIRCRAFT
     @Volatile var neuralIntervalMs = 100L
     /**
      * Exposure metering, ~10 Hz (analysis thread): brightness of the recorded crop with the
@@ -124,9 +127,10 @@ class AnalysisEngine(
             try {
                 if (released) return@execute
                 val t0 = SystemClock.elapsedRealtimeNanos()
-                val dets = det.detect(bmp, timestampNs, area, targetClasses.labels) ?: return@execute
+                val m = model
+                val dets = det.detect(bmp, timestampNs, area, targetClasses.labels, m) ?: return@execute
                 lastNeuralMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6
-                neuralResults.add(NeuralRun(timestampNs, region, NEURAL_INPUT) to dets)
+                neuralResults.add(NeuralRun(timestampNs, region, m.inputPx) to dets)
                 telemetry?.line("nn")?.i("ts", timestampNs)?.n("ms", lastNeuralMs)?.i("n", dets.size)
                     ?.let { l -> if (region != null) l.a("roi", region.cx, region.cy, region.width, region.height, digits = 0) else l }?.send()
             } catch (e: Exception) {
@@ -231,8 +235,10 @@ class AnalysisEngine(
 
     companion object {
         private const val TAG = "AnalysisEngine"
-        /** Side of the zoomed detector input (EfficientDet-Lite0 runs at 320 x 320). */
-        const val ROI_SIZE = 320
-        private const val NEURAL_INPUT = 320
+        /**
+         * Side of the rendered zoomed detector region: the own model's input (384); MediaPipe
+         * shrinks it for the COCO model (320).
+         */
+        const val ROI_SIZE = 384
     }
 }

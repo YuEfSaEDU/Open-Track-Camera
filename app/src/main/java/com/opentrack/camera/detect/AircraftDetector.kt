@@ -12,8 +12,8 @@ import com.opentrack.tracking.Detection
 import com.opentrack.tracking.DetectionSource
 
 /**
- * Neural detector: MediaPipe EfficientDet-Lite (COCO), restricted to the classes of a
- * [TargetClasses] choice (aircraft only by default).
+ * Neural detector: a [DetectorModel] (the app's own aircraft model, or COCO EfficientDet-Lite0),
+ * restricted to the classes of a [TargetClasses] choice (aircraft by default).
  */
 class AircraftDetector private constructor(private val detector: ObjectDetector) : AutoCloseable {
     private var closed = false
@@ -57,15 +57,13 @@ class AircraftDetector private constructor(private val detector: ObjectDetector)
     }
 
     companion object {
-        const val MODEL = "models/efficientdet_lite0.tflite"
-
         /**
          * Creates the detector with [delegate]; throws when it is unavailable. Use it on the
          * thread that created it (see [DetectorHost]).
          */
-        fun create(context: Context, delegate: Delegate, labels: Collection<String>, scoreThreshold: Float = 0.35f): AircraftDetector {
+        fun create(context: Context, delegate: Delegate, model: DetectorModel, labels: Collection<String>, scoreThreshold: Float = model.scoreThreshold): AircraftDetector {
             val options = ObjectDetector.ObjectDetectorOptions.builder()
-                .setBaseOptions(BaseOptions.builder().setModelAssetPath(MODEL).setDelegate(delegate).build())
+                .setBaseOptions(BaseOptions.builder().setModelAssetPath(model.asset).setDelegate(delegate).build())
                 .setRunningMode(RunningMode.IMAGE)
                 // Room for an aircraft among cars and boats at an airshow.
                 .setMaxResults(10)

@@ -8,6 +8,8 @@ captures/
 .externalNativeBuild/
 .cxx/
 # Downloaded at build time by :app:downloadModels
-app/src/main/assets/models/
+app/src/main/assets/models/*
+# The own aircraft model (tools/detector) is committed.
+!app/src/main/assets/models/aircraft_fp16.tflite
 bench_out/
 __pycache__/

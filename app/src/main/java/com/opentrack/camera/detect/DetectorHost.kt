@@ -23,6 +23,7 @@ class DetectorHost(private val context: Context) : AutoCloseable {
     private var delegate: Delegate? = null
     private var gaveUp = false
     private var labels: Set<String> = TargetClasses.AIRCRAFT.labels
+    private var model = DetectorModel.AIRCRAFT
 
     @Volatile var status: String = "henüz çalışmadı"
         private set
@@ -35,9 +36,9 @@ class DetectorHost(private val context: Context) : AutoCloseable {
      * or is unavailable: the caller must not report such a run to the tracker, which would
      * take it for "looked closely, no aircraft" and drop a correct track. Only [labels] are kept.
      */
-    fun detect(bitmap: Bitmap, timestampNs: Long, region: Box, labels: Set<String>): List<Detection>? =
+    fun detect(bitmap: Bitmap, timestampNs: Long, region: Box, labels: Set<String>, model: DetectorModel): List<Detection>? =
         try {
-            thread.submit(Callable { detectHere(bitmap, timestampNs, region, labels) }).get()?.filter { it.label in labels }
+            thread.submit(Callable { detectHere(bitmap, timestampNs, region, labels, model) }).get()?.filter { it.label in labels }
         } catch (e: Exception) {
             null
         }
@@ -48,12 +49,14 @@ class DetectorHost(private val context: Context) : AutoCloseable {
     /** One-line summary for the camera report. */
     fun report(): String = "Sinir ağı: $status, $runs çalışma, $failures hata" + (lastError?.let { ", son hata: $it" } ?: "")
 
-    private fun detectHere(bitmap: Bitmap, timestampNs: Long, region: Box, labels: Set<String>): List<Detection>? {
-        if (labels != this.labels) {
-            // Another target choice: the detector is built for its classes (rare, ~0.1 s).
+    private fun detectHere(bitmap: Bitmap, timestampNs: Long, region: Box, labels: Set<String>, model: DetectorModel): List<Detection>? {
+        if (labels != this.labels || model != this.model) {
+            // Another target choice or model: the detector is built for them (rare, ~0.1 s).
             runCatching { detector?.close() }
             detector = null
+            gaveUp = false
             this.labels = labels
+            this.model = model
         }
         val d = ensure() ?: return null
         return try {
@@ -91,9 +94,9 @@ class DetectorHost(private val context: Context) : AutoCloseable {
     private fun create(delegates: List<Delegate>) {
         for (dg in delegates) {
             try {
-                detector = AircraftDetector.create(context, dg, labels)
+                detector = AircraftDetector.create(context, dg, model, labels)
                 delegate = dg
-                status = "$dg"
+                status = "$dg ${model.name.lowercase()}"
                 return
             } catch (e: Exception) {
                 lastError = "$dg oluşturulamadı: ${e.toString().take(300)}"

@@ -6,6 +6,7 @@ import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import com.opentrack.camera.detect.DetectorModel
 import com.opentrack.camera.record.VideoCodec
 import com.opentrack.camera.record.bitrateFor
 import android.media.MediaMetadataRetriever
@@ -68,6 +69,7 @@ class VideoProcessor(
     private val stabilizer: (fps: Int) -> StabilizerConfig,
     /** Neural classes that may become targets. */
     private val targetLabels: Set<String>,
+    private val model: DetectorModel,
     /** Sky blob detector on (detector mode hybrid / sky). */
     private val skyEnabled: Boolean,
     /** Long side of the output for 1440p+ sources: 1920 (1080p) or 2560 (1440p). */
@@ -282,9 +284,9 @@ class VideoProcessor(
                         val area = region ?: Box(srcW / 2.0, srcH / 2.0, srcW.toDouble(), srcH.toDouble())
                         // Runs on the detector's own thread: the GPU delegate must not touch this thread's EGL context.
                         // A failed run is not reported: it is not evidence of "no aircraft here".
-                        detector.detect(bmp, ts, area, targetLabels)?.let {
+                        detector.detect(bmp, ts, area, targetLabels, model)?.let {
                             dets += it
-                            runs += NeuralRun(ts, region, ROI)
+                            runs += NeuralRun(ts, region, model.inputPx)
                         }
                     }
                     val skyEvery = if (tracker.prediction.state == TrackState.TRACKING) 12 else 3
@@ -390,7 +392,7 @@ class VideoProcessor(
 
     private companion object {
         const val TAG = "VideoProcessor"
-        const val ROI = 320
+        const val ROI = 384
         const val CAPTURE_MARGIN = 1.25
     }
 }

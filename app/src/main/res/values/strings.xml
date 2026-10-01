@@ -77,4 +77,7 @@
     <string name="codec_no_10bit_gl">No 10-bit GPU output on this phone: 10-bit HEVC from 8-bit frames (smoother sky gradients only from the encoder).</string>
     <string name="share">Share</string>
     <string name="share_missing">The last video is no longer there.</string>
+    <string name="model_own">Model: aircraft (new)</string>
+    <string name="model_coco">Model: COCO (old)</string>
+    <string name="model_coco_vehicles">Model: COCO (vehicles)</string>
 </resources>

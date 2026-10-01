@@ -74,4 +74,7 @@
     <string name="codec_no_10bit_gl">Bu telefonda 10-bit GPU çıkışı yok: 10-bit HEVC 8-bit karelerden (yumuşak gök geçişi yalnızca kodlayıcıdan).</string>
     <string name="share">Paylaş</string>
     <string name="share_missing">Son video artık yok.</string>
+    <string name="model_own">Model: hava aracı (yeni)</string>
+    <string name="model_coco">Model: COCO (eski)</string>
+    <string name="model_coco_vehicles">Model: COCO (araçlar)</string>
 </resources>

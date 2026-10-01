@@ -22,7 +22,9 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   1x–4x ayarlanabilir; kamera zumu (`CONTROL_ZOOM_RATIO`) ayrıca ayarlanabilir (bazı telefonlarda
   belli bir oranın üstünde telefoto kameraya geçer; günlükteki odak uzaklığı bunu gösterir).
 - **Hibrit hedef tespiti**
-  - Sinir ağı: MediaPipe EfficientDet-Lite0 (COCO `airplane` sınıfı), ~10 Hz, asenkron.
+  - Sinir ağı: uygulamanın **kendi modeli** (`tools/detector`, uçak / helikopter / drone / kuş,
+    384 px, float16) ~10 Hz, asenkron. "Model" düğmesiyle eski COCO EfficientDet-Lite0'a geçilir;
+    "Hedef: tüm araçlar" (araba, tekne…) COCO'yu kullanır.
   - Gökyüzü dedektörü: düz gökyüzünde birkaç piksellik uzak uçakları bulan klasik yöntem
     (yerel arka plan farkı + sakin ve parlak halka testi). Sinir ağının göremediği küçük hedefler için.
   - **Yakınlaştırılmış tespit**: hedef varken sinir ağı çoğunlukla hedefin çevresine (4K'da ~1:1)

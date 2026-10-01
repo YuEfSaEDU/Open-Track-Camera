@@ -536,9 +536,13 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
    hedef çevresinden tam çözünürlükte bir luma yaması üzerinde yapılırsa küçük hedeflerde alt-piksel
    hassasiyet ve daha az kayma (şu an 640x360 analiz görüntüsünde).
 4. **Asenkron geri okuma (PBO)** ile render thread'deki `glReadPixels` beklemesini kaldırmak.
-5. **Uçak odaklı model**: eğitim hattı hazır (`tools/detector`, Colab not defteri): uçak, helikopter,
-   drone, kuş; COCO + Open Images + askeri uçak seti + drone seti + sentetik küçük hedefler. Model gelince
-   test videolarında EfficientDet-Lite0 ile karşılaştırılıp uygulamaya eklenecek.
+5. **Uçak odaklı model**: ilk sürüm uygulamada (`DetectorModel.AIRCRAFT`, Colab `small`, 25 epoch,
+   14 bin görüntü; doğrulama AP50 0.56, küçük nesne APs 0.07). SOLOTÜRK (9 video, canlı ROI, hibrit)
+   eşik 0.5'te: doğru hedefte 0.850 (COCO 0.851), yanlış 0.105 (0.097), kaçırma 0.044 (0.051), takipte
+   0.739 (0.704), iyi kadraj 0.752 (0.731); kullanıcı videosu eşit. Eşik 0.35'te daha çok takip
+   (0.768) ama daha çok yanlış kilit (0.130). Yalnız sinir ağı yine yetmiyor (doğru 0.56): uzak uçak
+   için gökyüzü dedektörü gerekli. Sonraki: `medium` veri, SOLOTÜRK tipi karelerin (video bazında
+   ayrılmış) eğitime eklenmesi, helikopter/drone test videoları.
 6. **Hibrit zoom**: otomatik zoom kırpma sınırına dayanınca lens zumunu kontrollü değiştirmek.
 7. **ADS-B entegrasyonu**: yakındaki uçakların konumundan hedefin ekrandaki yerini tahmin edip
    ön-kilit, kaybolunca arama yönü.
