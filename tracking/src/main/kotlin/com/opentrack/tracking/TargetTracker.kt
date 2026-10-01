@@ -43,8 +43,20 @@ data class TrackPrediction(
      * the aircraft while stabilizing on the point.
      */
     val centerOffset: Vec2 = Vec2.ZERO,
+    /**
+     * Whether framing (crop, zoom) should follow this target. A lock not yet confirmed as an
+     * aircraft (a sky blob on a cloud edge, a floor speck, a bird) is tracked but not framed:
+     * the view stays wide until the neural detector confirms it, or until it is too small to
+     * confirm but moves across the sky like an aircraft (clouds and specks do not).
+     */
+    val framable: Boolean = true,
+    /** Changes whenever the tracker starts a new track (a different object): framing glides to it. */
+    val trackId: Int = 0,
 ) {
     val hasTarget: Boolean get() = state == TrackState.TRACKING || state == TrackState.COASTING
+
+    /** This prediction as framing should see it: no target while the lock is tentative. */
+    fun forFraming(): TrackPrediction = if (framable || !hasTarget) this else IDLE.copy(timestampNs = timestampNs)
 
     /** Where framing should put the output center: the aircraft's center at [timestampNs]. */
     fun framingAt(timestampNs: Long): Vec2 = worldAt(timestampNs) + centerOffset
@@ -120,6 +132,14 @@ data class TrackerConfig(
     val minRecognizableSourcePx: Double = 12.0,
     /** A rejected spot is not acquired again for this long. */
     val rejectBlacklistNs: Long = 3_000_000_000L,
+    /**
+     * A target too small for the detector to confirm is framed once it moves across the sky
+     * (world coordinates) at least this fast, source px/s at 3840 px width: an aircraft does,
+     * a cloud or a speck on the ground does not.
+     */
+    val minFramableSpeedPxS: Double = 60.0,
+    /** Smallest zoomed detector region as a fraction of the frame height (DetectionPlanConfig.minSideFraction). */
+    val roiMinSideFraction: Double = 0.15,
     /** Neural detections disagreeing with the template this many times in a row force a re-seed. */
     val inconsistentReseedCount: Int = 2,
     /**
@@ -184,6 +204,7 @@ class TargetTracker(
     private val fy = KalmanCv1D(config.accelNoise)
     private val template = TemplateTracker()
     private var state = TrackState.IDLE
+    private var trackId = 0
     private var filterTimeNs = 0L
     private var lastSeenNs = 0L
     private var width = 0.0
@@ -214,6 +235,11 @@ class TargetTracker(
     /** The tracked size comes from a neural box (not only from a sky blob, i.e. the dark core). */
     private var sizeFromNeural = false
     private var confirmedThisFrame = false
+    /** Framing may follow this track (see [TrackPrediction.framable]); latched until the next track. */
+    private var framableLatched = false
+    /** Neural runs have been reported at least once (otherwise there is nothing to verify with). */
+    private var neuralSeen = false
+    private var frameHeightPx = 2160.0
     private class Rejected(val world: Vec2, val radius: Double, val untilNs: Long)
     private val rejected = ArrayList<Rejected>()
 
@@ -233,6 +259,8 @@ class TargetTracker(
     fun process(frame: LumaFrame, detections: List<Detection>, neuralRuns: List<NeuralRun> = emptyList()): TrackPrediction {
         val t = frame.timestampNs
         rejected.removeAll { it.untilNs <= t }
+        if (neuralRuns.isNotEmpty()) neuralSeen = true
+        frameHeightPx = frame.height * frame.scale
         frameWidthPx = frame.width * frame.scale
         frameCenter = Vec2(frameWidthPx / 2, frame.height * frame.scale / 2)
         updateLatestDetections(detections, t)
@@ -502,6 +530,16 @@ class TargetTracker(
         }
     }
 
+    private fun isFramable(): Boolean {
+        if (framableLatched || verified || userSelected || !neuralSeen) return true
+        val size = max(width, height)
+        val smallestRegion = config.roiMinSideFraction * frameHeightPx
+        val verifiable = size >= config.minRecognizableSourcePx && size * NEURAL_INPUT_PX / smallestRegion >= config.minRecognizablePx
+        val speed = sqrt(fx.velocity * fx.velocity + fy.velocity * fy.velocity)
+        if (!verifiable && state == TrackState.TRACKING && speed >= config.minFramableSpeedPxS * frameWidthPx / 3840.0) framableLatched = true
+        return framableLatched
+    }
+
     private fun isGood(m: TemplateTracker.Match?): Boolean =
         m != null && m.score >= config.minMatchScore && m.anchorScore >= config.minAnchorScore &&
             m.contrastRatio >= config.minContrastRatio && m.contrast >= config.minContrast
@@ -512,6 +550,7 @@ class TargetTracker(
 
     private fun startTrack(frame: LumaFrame, box: Box) {
         val t = frame.timestampNs
+        trackId++
         val w = toWorld(box.center, t)
         val posVar = (0.1 * max(box.width, box.height)).let { it * it } + 4.0
         val velVar = 2000.0 * 2000.0
@@ -527,6 +566,7 @@ class TargetTracker(
         state = TrackState.TRACKING
         userSelected = false
         verified = false
+        framableLatched = false
         unconfirmedRuns = 0
         inconsistentNeural = 0
         neuralDisagreements = 0
@@ -613,6 +653,8 @@ class TargetTracker(
                 lastMeasuredNs = lastSeenNs,
                 measuredWorld = if (measurementNs == t && state != TrackState.LOST) measurement else null,
                 centerOffset = centerOffset,
+                framable = isFramable(),
+                trackId = trackId,
             )
         }
         prediction = p
@@ -621,5 +663,6 @@ class TargetTracker(
 
     private companion object {
         const val DETECTION_TTL_NS = 700_000_000L
+        const val NEURAL_INPUT_PX = 320.0
     }
 }

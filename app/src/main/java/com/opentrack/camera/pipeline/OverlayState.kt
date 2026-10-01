@@ -26,4 +26,6 @@ data class OverlayState(
     val fps: Double,
     val analysisMs: Double,
     val neuralMs: Double,
+    /** False while the lock is tentative (not yet confirmed as an aircraft, not framed). */
+    val targetConfirmed: Boolean = true,
 )

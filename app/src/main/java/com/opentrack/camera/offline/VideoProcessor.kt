@@ -291,11 +291,12 @@ class VideoProcessor(
                     } else null
 
                     // Framing, ring, look-ahead output.
-                    val live = framing.update(ts, p)
+                    val framed = p.forFraming()
+                    val live = framing.update(ts, framed)
                     val capture = Box(live.cx, live.cy, live.width * CAPTURE_MARGIN, live.height * CAPTURE_MARGIN)
                     ring.store(renderer, texture, texMatrix, srcW, srcH, capture, ts)
                     framer.addFrame(ts, live.width, live.height, capture)
-                    framer.updateTrack(p)
+                    framer.updateTrack(framed)
                     framer.emit()?.let { writeOutput(it) }
 
                     frame++

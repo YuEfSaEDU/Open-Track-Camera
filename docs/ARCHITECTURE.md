@@ -181,6 +181,25 @@ yanlış hedeflere kilitlenebiliyordu ve bunu düzeltecek bir şey yoktu.
 - **Tahmin modunda hız sönümü**: ölçüm yokken hız 0.5 s zaman sabitiyle azalır; buluta giren uçak
   kadrajı düz bir çizgide kare dışına sürüklemez.
 
+### Kesinleşmemiş kilit kadrajlanmaz, kilitlenme yumuşak (`TrackPrediction.framable`, `acquireS`)
+
+Kullanıcı testlerinde (iç mekân, bulutlu gökyüzü) gökyüzü dedektörü bulut kenarlarına, yerdeki
+lekelere, kalabalığa kilitleniyor; doğrulama onları birkaç saniyede bırakıyordu ama o sürede kadraj
+ve zum yanlış hedefe gidiyordu.
+
+- **Kadraj kapısı**: takipçi her hedefi izler ama kadraj (kırpma, otomatik zum) ancak hedef
+  sinir ağıyla onaylanınca, kullanıcı seçince ya da onaylanamayacak kadar küçük olup gökyüzünde uçak
+  gibi ilerlediğinde (4K'da ≥ 60 px/s; bulut ve leke ilerlemez) hedefe döner. O zamana kadar
+  `forFraming()` boş tahmin verir ve görüntü normal EIS gibi geniş kalır. Ekranda onaysız hedef kesik
+  çizgili "aday" kutusu, ham blob'lar soluk dairelerdir.
+- **Yumuşak kilitlenme**: hedefe geçiş anında olmaz. 0→1 "bağlanma" değeri 0.8 s'de (smoothstep)
+  yükselir; hedef kaybolunca 1 s'de söner (kısa kayıpta kaldığı yerden devam eder). Ara
+  değerlerde hedef, EIS hedefi (karenin dünyadaki merkezi) ile uçak arasında karışık, ağırlığı ve
+  yay sertliği (canlı önizleme) kademeli büyür. Hedefi merkezde tutan sınır, kilit anındaki
+  uzaklıktan başlar ve yalnızca daralır: kadraj tek karede çekilmez ama uçak da dışarı kaçamaz.
+  Uzak bir yeni hedefe geçişte (`trackId` değişimi) süzülme baştan başlar. Testler: tek karedeki en
+  büyük kayma, anında kilide göre yarıdan az.
+
 ### Gökyüzü dedektörü (`SkyBlobDetector`)
 
 Uzaktaki bir uçak 4K karede birkaç piksel olabilir; 640x360'a (ve modelin 320x320 girişine)

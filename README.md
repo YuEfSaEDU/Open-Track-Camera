@@ -26,7 +26,9 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
     (yerel arka plan farkı + sakin ve parlak halka testi). Sinir ağının göremediği küçük hedefler için.
   - **Yakınlaştırılmış tespit**: hedef varken sinir ağı çoğunlukla hedefin çevresine (4K'da ~1:1)
     bakar, hedef yokken kareyi karolarla tarar. Gökyüzü dedektörünün bulduğu her şey sinir ağıyla
-    **doğrulanır**; tanınmayan (kalabalık, deniz, duman) takip bırakılır.
+    **doğrulanır**; tanınmayan (kalabalık, deniz, duman) takip bırakılır. Onaylanana kadar kadraj
+    ve zum hedefe dönmez (bulut kenarı, yer lekesi görüntüyü oynatmaz).
+  - **Yumuşak kilitlenme**: kadraj hedefe ~0.8 s'de süzülerek geçer, tek karede atlamaz.
 - **60 fps takip**: NCC şablon eşleme (alt-piksel), sabit hız Kalman filtresi, kaybolunca tahminle
   devam (coasting) ve tespitlerle yeniden yakalama.
 - **İleriye bakan stabilizasyon** (DaVinci Resolve'un yaklaşımının gerçek zamanlı hali):

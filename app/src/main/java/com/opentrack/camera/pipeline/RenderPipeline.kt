@@ -247,13 +247,15 @@ class RenderPipeline(
 
         // 2-3. Causal (live) crop sets zoom and where to capture; keep that region in the ring.
         val prediction = tracker.prediction
-        val live = framing.update(ts, prediction)
+        // A tentative lock (not yet confirmed as an aircraft) is tracked but not framed.
+        val framed = prediction.forFraming()
+        val live = framing.update(ts, framed)
         val capture = Box(live.cx, live.cy, live.width * CAPTURE_MARGIN, live.height * CAPTURE_MARGIN)
         ring?.store(renderer, texture, texMatrix, srcW, srcH, capture, ts)
 
         // 4. Stabilized output for the delayed frame.
         framer.addFrame(ts, live.width, live.height, capture)
-        framer.updateTrack(prediction)
+        framer.updateTrack(framed)
         framer.emit()?.let { out ->
             lastOutput = out
             encoder?.let { writeEncoder(it, out) }
@@ -331,7 +333,10 @@ class RenderPipeline(
             d.copy(box = d.box.movedTo(c))
         }
         listener.onOverlay(
-            OverlayState(srcW, srcH, previewMode, crop, framing.zoom, prediction.state, target, dets, fps, analysis.lastAnalysisMs, analysis.lastNeuralMs),
+            OverlayState(
+                srcW, srcH, previewMode, crop, framing.zoom, prediction.state, target, dets, fps, analysis.lastAnalysisMs, analysis.lastNeuralMs,
+                targetConfirmed = prediction.framable,
+            ),
         )
     }
 

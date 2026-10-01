@@ -54,6 +54,13 @@ data class StabilizerConfig(
     val targetWeight: Double = 1.0,
     /** Huber scale of the target goal, as a fraction of the crop width (NaN = plain L2). */
     val robustGoalScale: Double = 0.04,
+    /**
+     * Seconds to glide onto a newly locked target: goal, weight and containment limit ease in
+     * from plain stabilization instead of jumping. 0 = snap.
+     */
+    val acquireS: Double = 0.8,
+    /** Seconds for that engagement to fade after the target is lost (a brief loss resumes quickly). */
+    val releaseS: Double = 1.0,
 ) {
     /** Cut-off frequency of the equivalent L2 smoother in Hz. */
     val cutoffHz: Double get() = 2.0 * 0.1.pow(smoothness.coerceIn(0.0, 1.0))
@@ -105,6 +112,8 @@ class LookaheadFramer(
         val capture: Box?,
     ) {
         var track: TrackPrediction? = null
+        /** Engagement (0..1, before easing) at this frame; see [StabilizerConfig.acquireS]. */
+        var engagement = 0.0
     }
 
     private val past = ArrayDeque<Rec>()
@@ -168,6 +177,7 @@ class LookaheadFramer(
 
         // Normalize positions by the crop width so weights are resolution independent.
         val scale = window[cur].cropW
+        computeEngagement(window)
         for ((k, r) in window.withIndex()) {
             val pose = motion.poseAt(r.ts)
             val t = r.track
@@ -191,24 +201,29 @@ class LookaheadFramer(
             val fLoY = min(wLo.y, wHi.y) / scale
             val fHiY = max(wLo.y, wHi.y) / scale
 
+            val eis = pose.toWorld(center, center)
             if (t != null && t.hasTarget) {
+                val e = smoothstep(r.engagement)
                 val measured = t.measuredWorld
                 // Stabilize on the tracking point, center the aircraft (point + center offset).
                 val q = (if (c.lockToPoint && measured != null && t.timestampNs == r.ts) measured else t.worldAt(r.ts)) + t.centerOffset
                 var lead = t.velocity * c.leadTimeS
                 val maxLead = c.maxLeadFraction * r.cropW / 2
                 if (lead.length() > maxLead) lead = lead * (maxLead / lead.length())
-                gx[k] = (q.x + lead.x) / scale
-                gy[k] = (q.y + lead.y) / scale
-                a[k] = c.targetWeight
-                val mx = c.maxTargetOffset * r.cropW / 2 / scale
-                val my = c.maxTargetOffset * r.cropH / 2 / scale
-                loX[k] = q.x / scale - mx; hiX[k] = q.x / scale + mx
-                loY[k] = q.y / scale - my; hiY[k] = q.y / scale + my
+                // Gliding onto a new lock: the goal moves from the stabilized frame center to the
+                // target, its weight grows, and the containment limit closes in.
+                gx[k] = (eis.x + (q.x + lead.x - eis.x) * e) / scale
+                gy[k] = (eis.y + (q.y + lead.y - eis.y) * e) / scale
+                a[k] = c.eisGoalWeight + (c.targetWeight - c.eisGoalWeight) * e
+                if (e > 0) {
+                    val mx = c.maxTargetOffset / e * r.cropW / 2 / scale
+                    val my = c.maxTargetOffset / e * r.cropH / 2 / scale
+                    loX[k] = q.x / scale - mx; hiX[k] = q.x / scale + mx
+                    loY[k] = q.y / scale - my; hiY[k] = q.y / scale + my
+                }
             } else {
-                val w = pose.toWorld(center, center)
-                gx[k] = w.x / scale
-                gy[k] = w.y / scale
+                gx[k] = eis.x / scale
+                gy[k] = eis.y / scale
                 a[k] = c.eisGoalWeight
             }
             // Sensor / capture bounds always win over target containment.
@@ -252,6 +267,36 @@ class LookaheadFramer(
         }
         img = Vec2(img.x.clampSafe(x0, x1), img.y.clampSafe(y0, y1))
         return Output(r.ts, CropWindow(img.x, img.y, r.cropW, r.cropH, rotation), r.track)
+    }
+
+    /**
+     * Engagement along the window, carried forward from its first (already emitted) frame: it
+     * rises over [StabilizerConfig.acquireS] while a target is present and fades over
+     * [StabilizerConfig.releaseS] without one. A new track on a different object far from the
+     * previous one restarts the glide.
+     */
+    private fun computeEngagement(window: List<Rec>) {
+        val c = config
+        var e = window[0].engagement
+        var prevTs = window[0].ts
+        var prev: TrackPrediction? = window[0].track?.takeIf { it.hasTarget }
+        for (k in 1 until window.size) {
+            val r = window[k]
+            val dt = ((r.ts - prevTs) * 1e-9).coerceIn(0.0, 0.1)
+            prevTs = r.ts
+            val t = r.track
+            if (t != null && t.hasTarget) {
+                val p = prev
+                if (p != null && p.trackId != t.trackId &&
+                    (t.framingAt(r.ts) - p.framingAt(r.ts)).length() > c.maxTargetOffset * min(r.cropW, r.cropH) / 2
+                ) e = 0.0
+                e = if (c.acquireS > 0) min(1.0, e + dt / c.acquireS) else 1.0
+                prev = t
+            } else {
+                e = if (c.releaseS > 0) max(0.0, e - dt / c.releaseS) else 0.0
+            }
+            r.engagement = e
+        }
     }
 
     /** Largest crop rotation for this frame that still fits in the sensor and capture window. */

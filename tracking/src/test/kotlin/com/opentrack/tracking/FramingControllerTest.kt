@@ -36,7 +36,7 @@ class FramingControllerTest {
 
     @Test
     fun keepsCropInsideFrame() {
-        val f = FramingController(3840, 2160, 16.0 / 9, CameraMotion.NONE)
+        val f = FramingController(3840, 2160, 16.0 / 9, CameraMotion.NONE, FramingConfig(acquireS = 0.0))
         val edge = TrackPrediction(TrackState.TRACKING, 0, Vec2(10.0, 10.0), Vec2.ZERO, 50.0, 50.0, 1.0)
         val crop = f.update(0, edge)
         assertEquals(960.0, crop.cx, 1e-9)
@@ -76,5 +76,36 @@ class FramingControllerTest {
         }
         // Uncompensated this point would move by ~2 * 440 px * sin(1°) ≈ 15 px.
         assertTrue("jitter $maxJitter px", maxJitter < 2.0)
+    }
+
+    @Test
+    fun glidesOntoANewLockInsteadOfJumping() {
+        // Plain stabilization, then a lock on an aircraft far from the center.
+        val f = FramingController(3840, 2160, 16.0 / 9, CameraMotion.NONE)
+        f.zoom = 2.0
+        val target = Vec2(2700.0, 1450.0)
+        var prev: CropWindow? = null
+        var maxStep = 0.0
+        var crop: CropWindow? = null
+        for (i in 0 until 180) {
+            val t = i * 16_666_667L
+            val p = if (i < 30) TrackPrediction.IDLE.copy(timestampNs = t) else TrackPrediction(TrackState.TRACKING, t, target, Vec2.ZERO, 60.0, 30.0, 1.0, trackId = 1)
+            crop = f.update(t, p)
+            prev?.let { maxStep = maxOf(maxStep, crop.center.minus(it.center).length()) }
+            prev = crop
+        }
+        // ~1000 px to travel: no single frame may move more than a smooth glide would (~45 px).
+        assertTrue("largest step $maxStep px", maxStep < 50.0)
+        // ...and it gets there.
+        assertTrue("ended ${crop!!.center}", crop.center.minus(target).length() < 30.0)
+    }
+
+    @Test
+    fun tentativeLockIsNotFramed() {
+        val tentative = TrackPrediction(TrackState.TRACKING, 5, Vec2(3000.0, 1500.0), Vec2.ZERO, 30.0, 30.0, 1.0, framable = false)
+        val framed = tentative.forFraming()
+        assertTrue(!framed.hasTarget)
+        assertEquals(5L, framed.timestampNs)
+        assertTrue(tentative.copy(framable = true).forFraming().hasTarget)
     }
 }
