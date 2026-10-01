@@ -128,7 +128,7 @@ class LookaheadFramerTest {
             val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 20, targetWeight = 20.0, maxTargetOffset = 0.3, acquireS = acquireS))
             val out = run(f, 240) { t ->
                 if (t < 60 * frameNs) TrackPrediction.IDLE.copy(timestampNs = t)
-                else TrackPrediction(TrackState.TRACKING, t, target, Vec2.ZERO, 60.0, 30.0, 1.0, measuredWorld = target, trackId = 1)
+                else TrackPrediction(TrackState.TRACKING, t, target, Vec2.ZERO, 60.0, 30.0, 1.0, measuredWorld = target)
             }
             val steps = out.zipWithNext { a, b -> (b.crop.center - a.crop.center).length() }
             return steps.max() to (out.last().crop.center - target).length()

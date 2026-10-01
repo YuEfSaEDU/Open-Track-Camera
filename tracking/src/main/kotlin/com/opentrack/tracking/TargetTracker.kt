@@ -50,8 +50,6 @@ data class TrackPrediction(
      * confirm but moves across the sky like an aircraft (clouds and specks do not).
      */
     val framable: Boolean = true,
-    /** Changes whenever the tracker starts a new track (a different object): framing glides to it. */
-    val trackId: Int = 0,
 ) {
     val hasTarget: Boolean get() = state == TrackState.TRACKING || state == TrackState.COASTING
 
@@ -204,7 +202,6 @@ class TargetTracker(
     private val fy = KalmanCv1D(config.accelNoise)
     private val template = TemplateTracker()
     private var state = TrackState.IDLE
-    private var trackId = 0
     private var filterTimeNs = 0L
     private var lastSeenNs = 0L
     private var width = 0.0
@@ -550,7 +547,6 @@ class TargetTracker(
 
     private fun startTrack(frame: LumaFrame, box: Box) {
         val t = frame.timestampNs
-        trackId++
         val w = toWorld(box.center, t)
         val posVar = (0.1 * max(box.width, box.height)).let { it * it } + 4.0
         val velVar = 2000.0 * 2000.0
@@ -654,7 +650,6 @@ class TargetTracker(
                 measuredWorld = if (measurementNs == t && state != TrackState.LOST) measurement else null,
                 centerOffset = centerOffset,
                 framable = isFramable(),
-                trackId = trackId,
             )
         }
         prediction = p

@@ -89,7 +89,7 @@ class FramingControllerTest {
         var crop: CropWindow? = null
         for (i in 0 until 180) {
             val t = i * 16_666_667L
-            val p = if (i < 30) TrackPrediction.IDLE.copy(timestampNs = t) else TrackPrediction(TrackState.TRACKING, t, target, Vec2.ZERO, 60.0, 30.0, 1.0, trackId = 1)
+            val p = if (i < 30) TrackPrediction.IDLE.copy(timestampNs = t) else TrackPrediction(TrackState.TRACKING, t, target, Vec2.ZERO, 60.0, 30.0, 1.0)
             crop = f.update(t, p)
             prev?.let { maxStep = maxOf(maxStep, crop.center.minus(it.center).length()) }
             prev = crop
@@ -107,5 +107,27 @@ class FramingControllerTest {
         assertTrue(!framed.hasTarget)
         assertEquals(5L, framed.timestampNs)
         assertTrue(tentative.copy(framable = true).forFraming().hasTarget)
+    }
+
+    @Test
+    fun glidesWhenTheTrackJumps() {
+        // A re-seed moves the track 400 px in one frame (it had drifted onto the smoke trail).
+        fun maxStep(acquireS: Double): Double {
+            val f = FramingController(3840, 2160, 16.0 / 9, CameraMotion.NONE, FramingConfig(acquireS = acquireS))
+            f.zoom = 2.0
+            var prev: CropWindow? = null
+            var maxStep = 0.0
+            for (i in 0 until 180) {
+                val t = i * 16_666_667L
+                val pos = if (i < 90) Vec2(1700.0, 1000.0) else Vec2(2100.0, 1100.0)
+                val crop = f.update(t, TrackPrediction(TrackState.TRACKING, t, pos, Vec2.ZERO, 60.0, 30.0, 1.0))
+                if (i > 60) prev?.let { maxStep = maxOf(maxStep, (crop.center - it.center).length()) }
+                prev = crop
+            }
+            return maxStep
+        }
+        val snap = maxStep(0.0)
+        val glide = maxStep(0.8)
+        assertTrue("glide step $glide px vs snap $snap px", glide < snap / 2)
     }
 }

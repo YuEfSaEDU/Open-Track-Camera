@@ -272,8 +272,8 @@ class LookaheadFramer(
     /**
      * Engagement along the window, carried forward from its first (already emitted) frame: it
      * rises over [StabilizerConfig.acquireS] while a target is present and fades over
-     * [StabilizerConfig.releaseS] without one. A new track on a different object far from the
-     * previous one restarts the glide.
+     * [StabilizerConfig.releaseS] without one. A target that jumps (a different object, or a
+     * re-seed moving the track) restarts the glide.
      */
     private fun computeEngagement(window: List<Rec>) {
         val c = config
@@ -287,9 +287,8 @@ class LookaheadFramer(
             val t = r.track
             if (t != null && t.hasTarget) {
                 val p = prev
-                if (p != null && p.trackId != t.trackId &&
-                    (t.framingAt(r.ts) - p.framingAt(r.ts)).length() > c.maxTargetOffset * min(r.cropW, r.cropH) / 2
-                ) e = 0.0
+                // A jump (a switch to another object, or a re-seed that moved the track) glides too.
+                if (p != null && (t.framingAt(r.ts) - p.framingAt(r.ts)).length() > c.maxTargetOffset * min(r.cropW, r.cropH) / 2) e = 0.0
                 e = if (c.acquireS > 0) min(1.0, e + dt / c.acquireS) else 1.0
                 prev = t
             } else {

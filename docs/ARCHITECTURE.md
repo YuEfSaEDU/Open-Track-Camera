@@ -197,7 +197,7 @@ ve zum yanlış hedefe gidiyordu.
   değerlerde hedef, EIS hedefi (karenin dünyadaki merkezi) ile uçak arasında karışık, ağırlığı ve
   yay sertliği (canlı önizleme) kademeli büyür. Hedefi merkezde tutan sınır, kilit anındaki
   uzaklıktan başlar ve yalnızca daralır: kadraj tek karede çekilmez ama uçak da dışarı kaçamaz.
-  Uzak bir yeni hedefe geçişte (`trackId` değişimi) süzülme baştan başlar. Testler: tek karedeki en
+  Hedef bir karede sıçrarsa (başka bir nesneye geçiş, ya da takibin yeniden tohumlanıp kayması) süzülme baştan başlar. Testler: tek karedeki en
   büyük kayma, anında kilide göre yarıdan az.
 
 ### Gökyüzü dedektörü (`SkyBlobDetector`)

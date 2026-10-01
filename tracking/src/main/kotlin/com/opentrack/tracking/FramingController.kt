@@ -126,7 +126,6 @@ class FramingController(
 
     /** 0 = plain stabilization, 1 = fully following the target; ramps on lock and loss. */
     private var engagement = 0.0
-    private var lastTrackId = 0
     private var lastTargetWorld: Vec2? = null
     private var hadTarget = false
     /** Containment limit while gliding (fraction of the half crop): it only ever tightens. */
@@ -179,17 +178,16 @@ class FramingController(
         val dt = ((timestampNs - lastNs) * 1e-9).coerceIn(0.0, 0.1)
         lastNs = timestampNs
 
-        // Engagement: glide onto a new lock instead of jumping to it. A different object far
-        // from the last one (a switch) starts a new glide; the same aircraft re-found nearby
-        // after a short loss continues where it was.
+        // Engagement: glide onto a new lock instead of jumping to it. A target that jumps (a
+        // switch to another object, a re-seed that moved the track) starts a new glide; the
+        // same aircraft re-found nearby after a short loss continues where it was.
         var restart = target != null && !hadTarget
         if (target != null) {
             val prev = lastTargetWorld
-            if (track.trackId != lastTrackId && prev != null && (target - prev).length() > config.maxTargetOffset * min(cw, ch) / 2) {
+            if (prev != null && (target - prev).length() > config.maxTargetOffset * min(cw, ch) / 2) {
                 engagement = 0.0
                 restart = true
             }
-            lastTrackId = track.trackId
             lastTargetWorld = target
             engagement = if (config.acquireS > 0) min(1.0, engagement + dt / config.acquireS) else 1.0
         } else {
