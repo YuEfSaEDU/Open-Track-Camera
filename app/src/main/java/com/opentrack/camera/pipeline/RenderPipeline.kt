@@ -303,7 +303,7 @@ class RenderPipeline(
             if (previewMode == PreviewMode.OUTPUT && out != null) {
                 val (x, y, cw, ch) = fit(vw, vh, out.crop.width / out.crop.height)
                 GLES20.glViewport(x, y, cw, ch)
-                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop, shutterFor(out.timestampNs), homographyFor(out, it)) } }
+                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop, shutterFor(out.timestampNs), homographyFor(out, it), YuvRing.sharpenFor(outputWidth / out.crop.width)) } }
             } else {
                 val (x, y, cw, ch) = fit(vw, vh, srcW.toDouble() / srcH)
                 GLES20.glViewport(x, y, cw, ch)
@@ -334,7 +334,7 @@ class RenderPipeline(
         egl.makeCurrent(enc)
         GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
         val h = homographyFor(out, slot)
-        ring?.draw(slot, out.crop, shutterFor(out.timestampNs), h)
+        ring?.draw(slot, out.crop, shutterFor(out.timestampNs), h, YuvRing.sharpenFor(encoderWidth / out.crop.width))
         egl.setPresentationTime(enc, out.timestampNs)
         egl.swap(enc)
         telemetry?.let { t ->

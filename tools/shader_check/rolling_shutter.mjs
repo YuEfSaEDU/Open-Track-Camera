@@ -90,6 +90,8 @@ async function page_fn({ VERTEX, FRAGMENT }) {
   gl.uniform2f(U("uCapSize"), cap.width, cap.height);
   gl.uniform2f(U("uCenter"), cx, cy);
   gl.uniform3f(U("uReadout"), 0, 1, H);
+  gl.uniform2f(U("uTexel"), 1 / SW, 1 / SH);
+  gl.uniform1f(U("uSharp"), 0);
   const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
   const aPos = gl.getAttribLocation(prog, "aPos");

@@ -13,6 +13,16 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Video bit rate for an output whose long side is [longSide] px at up to 60 fps: 1440p gets
+ * more (sky gradients and fine detail at 1.8x the pixels of 1080p).
+ */
+fun bitrateFor(longSide: Int): Int = when {
+    longSide >= 2560 -> 60_000_000
+    longSide >= 1920 -> 40_000_000
+    else -> 16_000_000
+}
+
 data class RecordingConfig(
     val width: Int = 1920,
     val height: Int = 1080,

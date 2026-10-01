@@ -64,7 +64,12 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   uygulamasına açtığı 4K60) seçilir; takip, ileriye bakan stabilizasyon ve otomatik zoom aynı şekilde
   uygulanır, 1080p sonuç ve orijinal ses `Movies/OpenTrack` klasörüne yazılır. Kamera hareketi
   görüntüden kestirilir (kayıtlı videoda jiroskop yok).
-- **Kayıt**: donanım H.264 (isteğe bağlı HEVC) 40 Mbps + AAC ses, `Movies/OpenTrack` klasörüne.
+- **Kayıt**: donanım H.264 (isteğe bağlı HEVC) + AAC ses, `Movies/OpenTrack` klasörüne. **Çıkış:
+  1080p (40 Mbps) veya 1440p (60 Mbps)**: 1440p, kırpma 2560 pikselden genişken (4K'da ≤1.5x zum)
+  kaynağın gerçek detayını tutar; YouTube 1440p yüklemeye de daha iyi sıkıştırma verir.
+- **Büyütme kalitesi**: kırpma bikübik (Catmull-Rom) ölçeklenir, küçültürken 2x2 örnekle (titreşmez),
+  büyütme oranına göre hale yapmayan keskinleştirme uygulanır. Gerçek 4K karelerde bilineere göre
+  +1.5–4 dB (`tools/shader_check/upscale.mjs`).
 - **Kayıt günlüğü (telemetri)**: her kaydın yanına `Download/OpenTrack/OTC_….jsonl` yazılır: kare
   kare kamera ayarları (enstantane, ISO, odak uzaklığı, lens), pozlama döngüsünün kararları, tespitler,
   takip durumu, canlı ve kaydedilen kırpma — her biri videodaki zamanıyla. "Günlük" düğmesiyle

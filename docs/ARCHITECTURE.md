@@ -292,6 +292,31 @@ yüksek hız modu 120/240). Çözüm: kendi kamerayla 4K60 çek, sonra uygulamad
   arasında, hızlanınca çabuk kısalır, sakinleşince yavaş uzar (pompalama yok). Toplam pozlama aynı
   kalır, yalnız ISO/süre bölüşümü değişir.
 
+## Ölçekleme ve çıkış çözünürlüğü
+
+Kırpma iki kez örneklenir: kameradan halkaya (yakalama penceresi çıkış çözünürlüğünde saklanır;
+zum sensör çözünürlüğünü aşınca büyütme burada olur) ve halkadan çıkışa (~1:1, döndürme ve
+perspektifle). İkisi de bilineerdi; yumuşaklık birikiyordu.
+
+- **Saklama** (`PLANE_Y_FRAGMENT`): büyütürken ve ~1:1'de Catmull-Rom bikübik (kaynak piksel ızgarasında
+  9 bilineer örnek), 1.25x'ten fazla küçültürken 2x2 süper örnekleme (ince detay titreşmez).
+- **Çıkış** (`YuvRing` FRAGMENT): luma bikübik; ardından 4 komşuya karşı keskinleştirme, komşuların
+  min/max aralığına sıkıştırılır (hale yok). Miktar `sharpenFor(ölçek) = 0.5·(ölçek − 1)`, küçültmede 0.
+  Renk (chroma) bilineer kalır.
+- **Ölçüm** (`tools/shader_check/upscale.mjs`, uygulamanın GLSL'i Chromium WebGL2'de): 4K kareler 1.5/2/3
+  kat küçültülmüş "sensörden" büyütülüp gerçek 4K ile karşılaştırılır; küçültme alan filtreli gerçeğe.
+
+  | | bilineer | bikübik | bikübik + keskinleştirme |
+  |---|---|---|---|
+  | 1.5x büyütme | 36.6–44.7 dB | +1.6–2.6 dB | +1.8–3.3 dB |
+  | 2x büyütme | 34.7–42.9 dB | +2.1–3.2 dB | +2.5–4.1 dB |
+  | 3x büyütme | 30.7–40.4 dB | +1.5–2.7 dB | +1.9–3.8 dB |
+  | 0.625x küçültme | 46.6–47.5 dB | +0.4–0.75 dB | (keskinleştirme zararlı → 0) |
+
+  Seçilen miktar her büyütme oranında en iyi PSNR'a denk geliyor.
+- **Çıkış çözünürlüğü**: 4K sınıfı kaynakta 1080p veya 1440p (`Çıkış` düğmesi; galeri işleme de uyar).
+  1440p: halka ~200 MB (1080p ~110 MB), 60 Mbps.
+
 ## Kayıt
 
 - Enkoder yüzeyi aynı EGL bağlamına (`EGL_RECORDABLE_ANDROID`) bağlanır; her kare

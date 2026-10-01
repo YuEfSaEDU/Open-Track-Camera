@@ -6,6 +6,7 @@ import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import com.opentrack.camera.record.bitrateFor
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.opengl.EGLSurface
@@ -48,7 +49,7 @@ import kotlin.math.roundToInt
 
 /**
  * Processes a video from the gallery the way the live pipeline processes the camera: aircraft
- * detection and tracking, look-ahead stabilization, auto zoom, crop to 1080p (720p for small
+ * detection and tracking, look-ahead stabilization, auto zoom, crop to 1080p / 1440p (720p for small
  * sources). For phones that keep 4K60 for their own camera app: film with it, then process
  * here. There is no gyro for a recorded video, so camera motion comes from the image
  * ([VisualMotionEstimator]) and rolling shutter is not corrected. The audio track is copied.
@@ -68,6 +69,8 @@ class VideoProcessor(
     private val targetLabels: Set<String>,
     /** Sky blob detector on (detector mode hybrid / sky). */
     private val skyEnabled: Boolean,
+    /** Long side of the output for 1440p+ sources: 1920 (1080p) or 2560 (1440p). */
+    private val outputLongSide: Int,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -127,10 +130,9 @@ class VideoProcessor(
         val srcW = if (quarter % 2 == 1) codedH else codedW
         val srcH = if (quarter % 2 == 1) codedW else codedH
         val big = maxOf(srcW, srcH) >= 2560
-        val (outW, outH) = when {
-            srcW >= srcH -> if (big) 1920 to 1080 else 1280 to 720
-            else -> if (big) 1080 to 1920 else 720 to 1280
-        }
+        val long = if (big) outputLongSide else 1280
+        val short = long * 9 / 16
+        val (outW, outH) = if (srcW >= srcH) long to short else short to long
 
         // --- GL ---
         val egl = EglCore()
@@ -184,7 +186,7 @@ class VideoProcessor(
         val audioFormat = audioIndex?.let { extractor.getTrackFormat(it) }
         val sink = MuxerSink(pfd.fileDescriptor, audioFormat != null)
         audioFormat?.let { sink.addAudioTrack(it) }
-        val encoder = VideoEncoder(outW, outH, fps, if (big) 40_000_000 else 16_000_000, MediaFormat.MIMETYPE_VIDEO_AVC, sink, 0L)
+        val encoder = VideoEncoder(outW, outH, fps, bitrateFor(long), MediaFormat.MIMETYPE_VIDEO_AVC, sink, 0L)
         val encSurface: EGLSurface = egl.createWindowSurface(encoder.inputSurface)
 
         // Track log next to the video (Download/OpenTrack), in the bench's CSV layout, so a
@@ -205,7 +207,7 @@ class VideoProcessor(
             val slot = ring.find(o.timestampNs) ?: return
             egl.makeCurrent(encSurface)
             GLES20.glViewport(0, 0, outW, outH)
-            ring.draw(slot, o.crop)
+            ring.draw(slot, o.crop, sharpen = YuvRing.sharpenFor(outW / o.crop.width))
             egl.setPresentationTime(encSurface, o.timestampNs)
             egl.swap(encSurface)
             egl.makeCurrent(pbuffer)

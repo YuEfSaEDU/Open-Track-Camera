@@ -59,10 +59,13 @@ class FrameRenderer {
 
     /**
      * Stores the [left, top, width, height] image region as BT.601 full-range luma into the
-     * bound R8 framebuffer (image top in texture row 0).
+     * bound R8 framebuffer of [outW] x [outH] (image top in texture row 0), from a source of
+     * [sourceW] x [sourceH] px: enlarged with a bicubic (Catmull-Rom) filter, which keeps edges
+     * much crisper than bilinear when zoomed past the sensor's resolution, and shrunk with
+     * 2x2 supersampling, which keeps fine detail from shimmering.
      */
-    fun drawLumaPlane(texture: Int, texMatrix: FloatArray, left: Float, top: Float, width: Float, height: Float) {
-        planeY.draw(texture, texMatrix, left, top, width, height, true, 0f, 0f)
+    fun drawLumaPlane(texture: Int, texMatrix: FloatArray, left: Float, top: Float, width: Float, height: Float, outW: Int, outH: Int, sourceW: Int, sourceH: Int) {
+        planeY.draw(texture, texMatrix, left, top, width, height, true, width / outW, height / outH, 1f / sourceW, 1f / sourceH)
     }
 
     /**
@@ -90,9 +93,10 @@ class FrameRenderer {
         val uTexMatrix = GLES20.glGetUniformLocation(id, "uTexMatrix")
         val uRotation = GLES20.glGetUniformLocation(id, "uRotation")
         val uPx = GLES20.glGetUniformLocation(id, "uPx")
+        val uSrc = GLES20.glGetUniformLocation(id, "uSrc")
         val uTex = GLES20.glGetUniformLocation(id, "sTex")
 
-        fun draw(texture: Int, m: FloatArray, l: Float, t: Float, w: Float, h: Float, flip: Boolean, px: Float, py: Float) {
+        fun draw(texture: Int, m: FloatArray, l: Float, t: Float, w: Float, h: Float, flip: Boolean, px: Float, py: Float, srcX: Float = 0f, srcY: Float = 0f) {
             GLES20.glUseProgram(id)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
@@ -103,6 +107,7 @@ class FrameRenderer {
             GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, m, 0)
             GLES20.glUniform1i(uRotation, displayRotationQuarterTurns and 3)
             if (uPx >= 0) GLES20.glUniform2f(uPx, px, py)
+            if (uSrc >= 0) GLES20.glUniform2f(uSrc, srcX, srcY)
             GLES20.glEnableVertexAttribArray(aPos)
             GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -160,10 +165,42 @@ class FrameRenderer {
             }
         """
 
+        // uPx: one stored pixel, uSrc: one source pixel (normalized image units).
         const val PLANE_Y_FRAGMENT = COMMON + """
+            uniform vec2 uPx;
+            uniform vec2 uSrc;
+            float lumaAt(vec2 p) {
+                return dot(texture2D(sTex, imgToTex(p)).rgb, vec3(0.299, 0.587, 0.114));
+            }
+            // Catmull-Rom bicubic from 9 bilinear taps placed on the source pixel grid.
+            float bicubic(vec2 p) {
+                vec2 s = p / uSrc;
+                vec2 t1 = floor(s - 0.5) + 0.5;
+                vec2 f = s - t1;
+                vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+                vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+                vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+                vec2 w3 = f * f * (-0.5 + 0.5 * f);
+                vec2 w12 = w1 + w2;
+                vec2 a = (t1 - 1.0) * uSrc;
+                vec2 b = (t1 + w2 / w12) * uSrc;
+                vec2 c = (t1 + 2.0) * uSrc;
+                return (lumaAt(vec2(a.x, a.y)) * w0.x + lumaAt(vec2(b.x, a.y)) * w12.x + lumaAt(vec2(c.x, a.y)) * w3.x) * w0.y
+                     + (lumaAt(vec2(a.x, b.y)) * w0.x + lumaAt(vec2(b.x, b.y)) * w12.x + lumaAt(vec2(c.x, b.y)) * w3.x) * w12.y
+                     + (lumaAt(vec2(a.x, c.y)) * w0.x + lumaAt(vec2(b.x, c.y)) * w12.x + lumaAt(vec2(c.x, c.y)) * w3.x) * w3.y;
+            }
             void main() {
-                float y = dot(texture2D(sTex, imgToTex(vImg)).rgb, vec3(0.299, 0.587, 0.114));
-                gl_FragColor = vec4(y, 0.0, 0.0, 1.0);
+                float y;
+                if (uPx.x <= uSrc.x * 1.25) {
+                    // Enlarging (or about 1:1, where bilinear would blur by the sub-pixel offset).
+                    y = bicubic(vImg);
+                } else {
+                    // Shrinking: average 2x2 samples over the stored pixel's footprint.
+                    vec2 q = uPx * 0.25;
+                    y = 0.25 * (lumaAt(vImg + vec2(-q.x, -q.y)) + lumaAt(vImg + vec2(q.x, -q.y))
+                              + lumaAt(vImg + vec2(-q.x, q.y)) + lumaAt(vImg + vec2(q.x, q.y)));
+                }
+                gl_FragColor = vec4(clamp(y, 0.0, 1.0), 0.0, 0.0, 1.0);
             }
         """
 

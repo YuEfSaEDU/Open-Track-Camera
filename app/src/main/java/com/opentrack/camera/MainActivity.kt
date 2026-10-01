@@ -38,6 +38,7 @@ import com.opentrack.camera.pipeline.PreviewMode
 import com.opentrack.camera.pipeline.RenderPipeline
 import com.opentrack.camera.record.Recorder
 import com.opentrack.camera.record.RecordingConfig
+import com.opentrack.camera.record.bitrateFor
 import com.opentrack.camera.sensor.GyroSource
 import com.opentrack.camera.ui.OverlayView
 import com.opentrack.tracking.CameraMotion
@@ -113,6 +114,8 @@ class MainActivity : AppCompatActivity() {
     private var targetClasses = TargetClasses.AIRCRAFT
     private var outputWidth = 1920
     private var outputHeight = 1080
+    /** Output long side for 4K-class sources: 1920 (1080p) or 2560 (1440p). */
+    private var outputLongSide = 1920
     private var lastStatusMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -121,6 +124,7 @@ class MainActivity : AppCompatActivity() {
         settings = settings.copy(shutterNs = prefs.getLong(PREF_SHUTTER, CameraSettings().shutterNs))
         detectorMode = AnalysisEngine.Mode.entries.firstOrNull { it.name == prefs.getString(PREF_DETECTOR, null) } ?: detectorMode
         targetClasses = TargetClasses.entries.firstOrNull { it.name == prefs.getString(PREF_TARGET, null) } ?: targetClasses
+        outputLongSide = prefs.getInt(PREF_OUTPUT, 1920)
         lastCrash = CrashLog.last(this)
         if (lastCrash != null) Toast.makeText(this, R.string.crash_recorded, Toast.LENGTH_LONG).show()
         setContentView(R.layout.activity_main)
@@ -195,6 +199,14 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.resolution).setOnClickListener { cycleResolution() }
         findViewById<Button>(R.id.lens).setOnClickListener { cycleLens() }
+        findViewById<Button>(R.id.outputRes).setOnClickListener {
+            if (recorder?.isRecording == true) return@setOnClickListener
+            outputLongSide = if (outputLongSide == 1920) 2560 else 1920
+            prefs.edit { putInt(PREF_OUTPUT, outputLongSide) }
+            stopPipeline()
+            startPipeline()
+            refreshButtons()
+        }
         findViewById<Button>(R.id.telemetry).setOnClickListener {
             prefs.edit { putBoolean(PREF_TELEMETRY, !prefs.getBoolean(PREF_TELEMETRY, true)) }
             refreshButtons()
@@ -263,7 +275,8 @@ class MainActivity : AppCompatActivity() {
         refreshButtons()
         val srcW = p.sourceSize.width
         val srcH = p.sourceSize.height
-        if (srcW >= 2560) { outputWidth = 1920; outputHeight = 1080 } else { outputWidth = 1280; outputHeight = 720 }
+        // 4K-class sources (the telephoto's 3648 px too): 1080p or 1440p as chosen; else 720p.
+        if (srcW >= 2560) { outputWidth = outputLongSide; outputHeight = outputLongSide * 9 / 16 } else { outputWidth = 1280; outputHeight = 720 }
         cropZoom = FramingController.nativeZoom(srcW, outputWidth)
 
         val rotationQuarter = display?.rotation ?: Surface.ROTATION_90
@@ -442,7 +455,7 @@ class MainActivity : AppCompatActivity() {
         status.text = getString(R.string.processing, 0, 0.0)
         val p = VideoProcessor(
             applicationContext, uri, sharedDetector(), zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) },
-            targetClasses.labels, detectorMode != AnalysisEngine.Mode.NEURAL_ONLY,
+            targetClasses.labels, detectorMode != AnalysisEngine.Mode.NEURAL_ONLY, outputLongSide,
             object : VideoProcessor.Listener {
             override fun onProgress(fraction: Double, processingFps: Double) = runOnUiThread {
                 status.text = getString(R.string.processing, (fraction * 100).roundToInt(), processingFps) + " · " + (detector?.shortStatus() ?: "NN -")
@@ -622,7 +635,7 @@ class MainActivity : AppCompatActivity() {
         val rec = Recorder(contentResolver)
         try {
             val enc = rec.start(
-                RecordingConfig(width = outputWidth, height = outputHeight, fps = p.fps),
+                RecordingConfig(width = outputWidth, height = outputHeight, fps = p.fps, bitrate = bitrateFor(outputWidth)),
                 cameraTimestampRealtime = p.timestampRealtime,
                 audioAllowed = hasPermission(Manifest.permission.RECORD_AUDIO),
             )
@@ -721,6 +734,7 @@ class MainActivity : AppCompatActivity() {
     private fun refreshButtons() {
         logSettings()
         findViewById<Button>(R.id.lens).text = lensLabel()
+        findViewById<Button>(R.id.outputRes).text = getString(R.string.output_res, if (outputLongSide >= 2560) "1440p" else "1080p")
         findViewById<Button>(R.id.telemetry).setText(if (prefs.getBoolean(PREF_TELEMETRY, true)) R.string.telemetry_on else R.string.telemetry_off)
         findViewById<Button>(R.id.viewMode).setText(if (previewMode == PreviewMode.WIDE) R.string.view_wide else R.string.view_output)
         findViewById<Button>(R.id.autoLock).setText(if (autoLock) R.string.auto_lock_on else R.string.auto_lock_off)
@@ -766,6 +780,7 @@ class MainActivity : AppCompatActivity() {
         const val PREF_DETECTOR = "detectorMode"
         const val PREF_TARGET = "targetClasses"
         const val PREF_LENS = "lens"
+        const val PREF_OUTPUT = "outputLongSide"
         const val PREF_TELEMETRY = "telemetry"
         /** Shutter choices: automatic, smart (follows the motion), then 1/250 … 1/2000 s. */
         val SHUTTERS = listOf(0L, CameraSettings.SHUTTER_SMART, 4_000_000L, 2_000_000L, 1_000_000L, 500_000L)
