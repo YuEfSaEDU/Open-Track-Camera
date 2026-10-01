@@ -8,8 +8,8 @@
     <string name="release_target">Release target</string>
     <string name="focus_inf_on">Focus: ∞</string>
     <string name="focus_inf_off">Focus: auto</string>
-    <string name="shutter_fast_on">Shutter: 1/1000</string>
-    <string name="shutter_fast_off">Shutter: auto</string>
+    <string name="shutter_fixed">Shutter: 1/%d</string>
+    <string name="shutter_auto">Shutter: auto</string>
     <string name="detector_hybrid">Detector: hybrid</string>
     <string name="detector_neural">Detector: neural</string>
     <string name="detector_sky">Detector: sky</string>
@@ -37,7 +37,7 @@
     <string name="permission_needed">Camera permission is required.</string>
     <string name="saved">Saved: %s</string>
     <string name="save_failed">Recording failed</string>
-    <string name="status">%1$s → %2$dx%3$d@%4$d · %5$.0f fps · analysis %6$.1f ms · NN %7$.0f ms · %8$s</string>
+    <string name="status">%1$s → %2$dx%3$d@%4$d · %5$.0f fps · analysis %6$.1f ms · NN %7$.0f ms · %9$s · %8$s</string>
     <string name="resolution">Stream: %s</string>
     <string name="camera_report">Camera report</string>
     <string name="forced_4k60_hint">Experimental: 4K60 is not offered to this app. If the picture freezes, errors or stays at 30 fps, switch back.</string>

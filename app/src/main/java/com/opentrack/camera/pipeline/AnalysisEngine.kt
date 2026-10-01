@@ -12,6 +12,7 @@ import com.opentrack.tracking.Detection
 import com.opentrack.tracking.DetectionPlanner
 import com.opentrack.tracking.LumaFrame
 import com.opentrack.tracking.NeuralRun
+import com.opentrack.tracking.ShutterPriorityExposure
 import com.opentrack.tracking.SkyBlobDetector
 import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackState
@@ -46,6 +47,8 @@ class AnalysisEngine(
 
     @Volatile var mode = Mode.HYBRID
     @Volatile var neuralIntervalMs = 100L
+    /** Mean luma of the analysis frames, ~10 Hz, for the exposure loop (analysis thread). */
+    @Volatile var onSceneLuma: ((Double) -> Unit)? = null
     @Volatile var lastAnalysisMs = 0.0
         private set
     @Volatile var lastNeuralMs = 0.0
@@ -134,6 +137,7 @@ class AnalysisEngine(
             val tracking = tracker.prediction.state == TrackState.TRACKING
             val skyEvery = if (tracking) 12 else 3
             if (mode != Mode.NEURAL_ONLY && frameIndex % skyEvery == 0L) detections += skyBlob.detect(frame)
+            if (frameIndex % 6 == 0L) onSceneLuma?.invoke(ShutterPriorityExposure.meanLuma(frame))
             frameIndex++
             visualMotion?.process(frame, lastTargetBox)
             val p = tracker.process(frame, detections, runs)

@@ -108,6 +108,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         CrashLog.install(this)
+        settings = settings.copy(shutterNs = prefs.getLong(PREF_SHUTTER, CameraSettings().shutterNs))
         lastCrash = CrashLog.last(this)
         if (lastCrash != null) Toast.makeText(this, R.string.crash_recorded, Toast.LENGTH_LONG).show()
         setContentView(R.layout.activity_main)
@@ -158,7 +159,9 @@ class MainActivity : AppCompatActivity() {
             updateSettings(settings.copy(focusInfinity = !settings.focusInfinity))
         }
         findViewById<Button>(R.id.shutter).setOnClickListener {
-            updateSettings(settings.copy(shutterPriority = !settings.shutterPriority))
+            val next = SHUTTERS[(SHUTTERS.indexOf(settings.shutterNs) + 1).mod(SHUTTERS.size)]
+            prefs.edit { putLong(PREF_SHUTTER, next) }
+            updateSettings(settings.copy(shutterNs = next))
         }
         findViewById<Button>(R.id.stabilizer).setOnClickListener {
             val all = StabPreset.entries
@@ -262,7 +265,10 @@ class MainActivity : AppCompatActivity() {
 
         val analysisW = 640
         val analysisH = ((analysisW.toDouble() * srcH / srcW) / 2).roundToInt() * 2
-        val engine = AnalysisEngine(tracker, detector, visual, motion, analysisW, analysisH, srcW.toDouble() / analysisW).also { it.mode = detectorMode }
+        val engine = AnalysisEngine(tracker, detector, visual, motion, analysisW, analysisH, srcW.toDouble() / analysisW).also {
+            it.mode = detectorMode
+            it.onSceneLuma = { luma -> camera?.onSceneLuma(luma) }
+        }
         analysis = engine
 
         val framing = FramingController(srcW, srcH, outputWidth.toDouble() / outputHeight, motion).also {
@@ -575,7 +581,8 @@ class MainActivity : AppCompatActivity() {
                 TrackState.LOST -> R.string.state_lost
             },
         )
-        status.text = getString(R.string.status, p.label, outputWidth, outputHeight, p.fps, s.fps, s.analysisMs, s.neuralMs, stateText)
+        val exposure = camera?.takeIf { it.lastExposureNs > 0 }?.let { "1/${(1e9 / it.lastExposureNs).roundToInt()} s ISO ${it.lastIso}" } ?: "-"
+        status.text = getString(R.string.status, p.label, outputWidth, outputHeight, p.fps, s.fps, s.analysisMs, s.neuralMs, stateText, exposure)
         if (zoomConfig.auto) {
             findViewById<TextView>(R.id.cropZoomLabel).text = getString(R.string.crop_zoom, s.zoom)
             findViewById<SeekBar>(R.id.cropZoom).progress = ((s.zoom - 1.0) / 0.05).roundToInt()
@@ -593,7 +600,8 @@ class MainActivity : AppCompatActivity() {
             },
         )
         findViewById<Button>(R.id.focus).setText(if (settings.focusInfinity) R.string.focus_inf_on else R.string.focus_inf_off)
-        findViewById<Button>(R.id.shutter).setText(if (settings.shutterPriority) R.string.shutter_fast_on else R.string.shutter_fast_off)
+        findViewById<Button>(R.id.shutter).text = if (settings.shutterNs > 0) getString(R.string.shutter_fixed, (1e9 / settings.shutterNs).roundToInt())
+        else getString(R.string.shutter_auto)
         findViewById<Button>(R.id.autoZoom).setText(if (zoomConfig.auto) R.string.auto_zoom_on else R.string.auto_zoom_off)
         findViewById<Button>(R.id.processVideo).setText(if (processor != null) R.string.process_cancel else R.string.process_video)
         val manager = getSystemService(CameraManager::class.java)
@@ -613,6 +621,9 @@ class MainActivity : AppCompatActivity() {
         const val PREF_PROFILE = "profile"
         const val PREF_FORCE_4K60 = "force4k60"
         const val PREF_VENDOR = "vendorUnlock"
+        const val PREF_SHUTTER = "shutterNs"
+        /** Shutter choices: automatic, then 1/250 … 1/2000 s. */
+        val SHUTTERS = listOf(0L, 4_000_000L, 2_000_000L, 1_000_000L, 500_000L)
         const val FORCED_4K60 = "3840x2160@60!"
     }
 }

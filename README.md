@@ -38,7 +38,8 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
 - **Rolling shutter düzeltmesi**: jiroskopla her satırın okunma anındaki kamera pozu hesaplanır;
   pan'daki eğilme ve titremedeki "jöle" etkisi kayıtta GPU'da düzeltilir.
 - **Uçak fotoğrafçılığı ayarları**: sonsuza sabit odak (gökyüzünde AF aramasını önler), EV,
-  hızlı enstantane (≈1/1000 s, ISO otomatik türetilir), OIS açık / kamera EIS kapalı.
+  enstantane önceliği (oto, 1/250–1/2000 s; varsayılan 1/500) — ISO, kameranın otomatik pozlamasının
+  parlaklığını koruyacak şekilde sürekli ayarlanır; stabilize kırpmada kare içi hareket bulanıklığını önler, OIS açık / kamera EIS kapalı.
 - **Otomatik zoom**: kullanıcının belirlediği min/max sınırlar içinde hedefi çıkışta sabit boyutta
   tutar; hedef yalnızca tahminle izlenirken veya kadrajın kenarına kayarken genişler, hedef yokken
   en geniş sınıra döner (yeniden yakalamak için). Ölü bölge ve hız sınırlarıyla "nefes alma" yapmaz.

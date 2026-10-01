@@ -16,6 +16,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import com.opentrack.tracking.ShutterPriorityExposure
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -143,15 +144,21 @@ class CameraController(
 
         val exp = profile.exposureRangeNs
         val iso = profile.isoRange
+        // Shutter priority, once auto exposure has shown how bright the scene should be.
         // High-speed sessions only honor automatic exposure (and 1/120 s is short already).
-        if (!profile.highSpeed && s.shutterPriority && profile.supportsManualSensor && exp != null && iso != null && lastAutoExposureNs > 0) {
+        val manual = !profile.highSpeed && wantsShutterPriority(s) && exp != null && iso != null && ae != null &&
+            lastAutoExposureNs > 0 && ae.targetLuma != null
+        if (manual && exp != null) {
             val shutter = s.shutterNs.coerceIn(exp.lower, minOf(exp.upper, 1_000_000_000L / profile.fps))
-            val derivedIso = (lastAutoIso.toDouble() * lastAutoExposureNs / shutter).toInt().coerceIn(iso.lower, iso.upper)
+            if (!manualActive || shutter != manualShutterNs) ae!!.start(lastAutoIso, lastAutoExposureNs, shutter)
+            manualActive = true
+            manualShutterNs = shutter
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
             b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, shutter)
-            b.set(CaptureRequest.SENSOR_SENSITIVITY, derivedIso)
+            b.set(CaptureRequest.SENSOR_SENSITIVITY, ae!!.iso)
             b.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / profile.fps)
         } else {
+            manualActive = false
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, s.aeCompensation.coerceIn(profile.aeCompensationRange.lower, profile.aeCompensationRange.upper))
             b.set(CaptureRequest.CONTROL_AE_LOCK, s.aeLock)
@@ -170,11 +177,40 @@ class CameraController(
         }
     }
 
+    private val ae = profile.isoRange?.let { ShutterPriorityExposure(it.lower, it.upper) }
+    private var manualActive = false
+    private var manualShutterNs = 0L
+
+    /** Actual exposure time (ns) and ISO of the latest frame, for the status line. */
+    @Volatile var lastExposureNs = 0L
+        private set
+    @Volatile var lastIso = 0
+        private set
+
+    private fun wantsShutterPriority(s: CameraSettings) = s.shutterNs > 0 && profile.supportsManualSensor
+
+    /**
+     * Mean luma of the latest analysis frame (~10 Hz). Teaches the auto exposure brightness,
+     * or drives ISO in shutter priority.
+     */
+    fun onSceneLuma(mean: Double) = handler.post {
+        val e = ae ?: return@post
+        if (manualActive) {
+            if (e.update(mean) != null) applySettings(settings)
+        } else {
+            e.observeAuto(mean)
+            // Shutter priority was requested before auto exposure had settled: switch now.
+            if (wantsShutterPriority(settings) && !profile.highSpeed && lastAutoExposureNs > 0) applySettings(settings)
+        }
+    }
+
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
             val ts = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
             val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
             val skew = result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW) ?: 0L
+            lastExposureNs = exposure
+            lastIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: lastIso
             if (result.get(CaptureResult.CONTROL_AE_MODE) != CameraMetadata.CONTROL_AE_MODE_OFF) {
                 lastAutoExposureNs = exposure
                 lastAutoIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: lastAutoIso
