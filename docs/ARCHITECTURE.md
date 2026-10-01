@@ -271,6 +271,27 @@ yüksek hız modu 120/240). Çözüm: kendi kamerayla 4K60 çek, sonra uygulamad
 - Jiroskop yok: rolling shutter düzeltmesi yapılmaz; telefonun kendi stabilizasyonu kapalı
   çekilmiş videolar en iyi sonucu verir. Gerçek video testlerindeki ölçümler bu durumu temsil eder.
 
+## Pozlama (`ShutterPriorityExposure`, `ExposureMeter`, `SmartShutter`)
+
+- **Enstantane önceliği**: Camera2 otomatik pozlamanın süresini sınırlayamadığı için pozlama
+  uygulamada sürülür. Kameranın kendi AE'si oturunca hedef parlaklık öğrenilir (oturmazsa orta gri),
+  EV kaydırıcısı bunu kaydırır; her ölçüm karenin gerçek ISO/süresiyle değerlendirilir. Toplam pozlama
+  dört aşamada bölünür: ISO en altta ve hâlâ parlak → süre kısalır; tercih edilen süre, ISO 800'e kadar;
+  ISO 800'de süre 1/(2·fps)'e kadar uzar; sonra ISO yükselir.
+- **Ölçüm kaydedilen kırpmada** (`ExposureMeter`): bütün sensör karesi değil, canlı kırpmanın
+  bölgesi ölçülür (2-3x zumda karenin çoğu — yer, güneş, parlak bulut — kayda girmez). Kadrajlanan
+  bir hedef varsa kutusu ortalamanın yarısına kadar ağırlık alır (64 analiz pikselinden küçük hedef
+  orantılı olarak daha az): parlak gökte uçak siluet kalmaz.
+- **Parlak alan koruması**: kırpmanın %98 dilimi (`highlight`) patlıyorsa (≥254) pozlama adım adım
+  düşer, patlamıyorsa 245'te tutulur; ama parlaklık hedefinin en fazla 1 durak altına iner (güneşli
+  bir bulut yüzünden bütün görüntü kararmaz).
+- **Akıllı enstantane** (`SmartShutter`): tercih edilen süre, konunun sensörde ne hızla kaydığından
+  seçilir: çıkışta en fazla ~1.5 piksel bulanıklık. Konu, kadrajlanan hedefin kendisidir (pan
+  sırasında arka planın bulanıklaşması istenen bir şeydir); hedef yoksa kırpmanın altındaki sahne
+  (el titremesi, jiroskoptan). Hız 50 ms'lik poz farkından ölçülür; süre 1/4000 ile 1/(2·fps)
+  arasında, hızlanınca çabuk kısalır, sakinleşince yavaş uzar (pompalama yok). Toplam pozlama aynı
+  kalır, yalnız ISO/süre bölüşümü değişir.
+
 ## Kayıt
 
 - Enkoder yüzeyi aynı EGL bağlamına (`EGL_RECORDABLE_ANDROID`) bağlanır; her kare

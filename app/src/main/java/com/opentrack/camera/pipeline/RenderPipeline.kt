@@ -274,6 +274,7 @@ class RenderPipeline(
         // A tentative lock (not yet confirmed as an aircraft) is tracked but not framed.
         val framed = prediction.forFraming()
         val live = framing.update(ts, framed)
+        analysis.meterCrop = live
         val capture = captureFor(live)
         ring?.store(renderer, texture, texMatrix, srcW, srcH, capture, ts)
         telemetry?.let { t ->

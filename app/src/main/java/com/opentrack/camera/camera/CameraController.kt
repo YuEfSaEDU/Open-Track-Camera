@@ -18,7 +18,9 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import com.opentrack.camera.diag.Telemetry
+import com.opentrack.tracking.SceneMetering
 import com.opentrack.tracking.ShutterPriorityExposure
+import com.opentrack.tracking.SmartShutter
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -177,12 +179,21 @@ class CameraController(
             lastAutoExposureNs > 0 && ae.ready
         ae?.ev = s.evThirds / 3.0
         if (manual && exp != null) {
-            val shutter = s.shutterNs.coerceIn(exp.lower, minOf(exp.upper, 1_000_000_000L / profile.fps))
             // In the dark the time may grow to half the frame interval (1/120 s at 60 fps).
-            val longest = maxOf(shutter, minOf(exp.upper, 1_000_000_000L / (2L * profile.fps)))
-            if (!manualActive || shutter != manualShutterNs) ae!!.start(lastAutoIso, lastAutoExposureNs, shutter, longest)
+            val halfFrame = minOf(exp.upper, 1_000_000_000L / (2L * profile.fps))
+            if (!manualActive || s.shutterNs != manualShutterNs) {
+                val shutter = if (s.shutterNs == CameraSettings.SHUTTER_SMART) {
+                    // Starts at 1/500 s; then follows the motion (onSceneLuma).
+                    smart = SmartShutter(maxOf(exp.lower, SMART_SHORTEST_NS), maxOf(exp.lower, halfFrame)).also { it.reset(2_000_000L) }
+                    smart!!.ns
+                } else {
+                    smart = null
+                    s.shutterNs.coerceIn(exp.lower, minOf(exp.upper, 1_000_000_000L / profile.fps))
+                }
+                ae!!.start(lastAutoIso, lastAutoExposureNs, shutter, maxOf(shutter, halfFrame))
+            }
             manualActive = true
-            manualShutterNs = shutter
+            manualShutterNs = s.shutterNs
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
             // See ShutterPriorityExposure: the chosen time is preferred; shorter in bright light
             // at minimum ISO, longer in the dark once ISO reaches its noise limit.
@@ -213,6 +224,9 @@ class CameraController(
         }
     }
 
+    /** The smart shutter while it is selected and shutter priority runs. */
+    private var smart: SmartShutter? = null
+
     private val ae = profile.isoRange?.let { ShutterPriorityExposure(it.lower, it.upper, minExposureNs = profile.exposureRangeNs?.lower ?: 1_000L) }
     private var manualActive = false
     private var manualShutterNs = 0L
@@ -223,21 +237,27 @@ class CameraController(
     @Volatile var lastIso = 0
         private set
 
-    private fun wantsShutterPriority(s: CameraSettings) = s.shutterNs > 0 && profile.supportsManualSensor
+    private fun wantsShutterPriority(s: CameraSettings) = s.shutterNs != 0L && profile.supportsManualSensor
 
     /**
-     * Mean luma of an analysis frame (~10 Hz) taken at [timestampNs]. Teaches the auto
-     * exposure brightness, or drives ISO / exposure time in shutter priority, judged against
-     * the settings that frame was actually taken with.
+     * Metering of an analysis frame (~10 Hz) taken at [timestampNs] (see
+     * [com.opentrack.tracking.ExposureMeter]). Teaches the auto exposure brightness, or drives
+     * ISO / exposure time in shutter priority, judged against the settings that frame was
+     * actually taken with. [blurLimitNs] steers the smart shutter.
      */
-    fun onSceneLuma(mean: Double, timestampNs: Long) = handler.post {
+    fun onSceneLuma(metering: SceneMetering, timestampNs: Long, blurLimitNs: Long?) = handler.post {
         val e = ae ?: return@post
+        val mean = metering.mean
         if (manualActive) {
             val shot = shotSettings(timestampNs) ?: return@post
-            val changed = e.update(mean, shot.second, shot.first)
-            telemetry?.line("ae")?.i("ts", timestampNs)?.s("mode", "manual")?.n("luma", mean)?.n("aim", e.aimLuma)
-                ?.i("frameExp", shot.first)?.i("frameIso", shot.second)?.i("exp", e.exposureNs)?.i("iso", e.iso)?.b("changed", changed)?.send()
-            if (changed) applySettings(settings)
+            val s = smart
+            val moved = s != null && e.setPreferred(s.update(blurLimitNs))
+            val changed = e.update(mean, shot.second, shot.first, metering.highlight)
+            telemetry?.line("ae")?.i("ts", timestampNs)?.s("mode", "manual")?.n("luma", mean)?.n("hl", metering.highlight, 0)?.n("aim", e.aimLuma)
+                ?.i("frameExp", shot.first)?.i("frameIso", shot.second)?.i("exp", e.exposureNs)?.i("iso", e.iso)
+                ?.let { l -> if (s != null) l.n("blurMs", blurLimitNs?.let { it / 1e6 }, 3).n("prefMs", s.ns / 1e6, 3) else l }
+                ?.b("changed", changed || moved)?.send()
+            if (changed || moved) applySettings(settings)
         } else {
             telemetry?.line("ae")?.i("ts", timestampNs)?.s("mode", "auto")?.n("luma", mean)?.b("settled", aeSettled)
                 ?.n("target", e.targetLuma)?.i("obs", e.observations)?.b("ready", e.ready)?.send()
@@ -336,5 +356,8 @@ class CameraController(
 
         /** Capture results remembered for matching analysis frames (~0.5 s at 60 fps). */
         const val SHOT_HISTORY = 32
+
+        /** The smart shutter's shortest time (1/4000 s): shorter only for the brightness. */
+        const val SMART_SHORTEST_NS = 250_000L
     }
 }

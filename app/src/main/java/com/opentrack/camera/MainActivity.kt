@@ -296,7 +296,8 @@ class MainActivity : AppCompatActivity() {
         val engine = AnalysisEngine(tracker, detector, visual, motion, analysisW, analysisH, srcW.toDouble() / analysisW).also {
             it.mode = detectorMode
             it.targetClasses = targetClasses
-            it.onSceneLuma = { luma, ts -> camera?.onSceneLuma(luma, ts) }
+            it.outputWidth = outputWidth
+            it.onSceneLuma = { m, ts, blur -> camera?.onSceneLuma(m, ts, blur) }
         }
         analysis = engine
 
@@ -732,8 +733,11 @@ class MainActivity : AppCompatActivity() {
             },
         )
         findViewById<Button>(R.id.focus).setText(if (settings.focusInfinity) R.string.focus_inf_on else R.string.focus_inf_off)
-        findViewById<Button>(R.id.shutter).text = if (settings.shutterNs > 0) getString(R.string.shutter_fixed, (1e9 / settings.shutterNs).roundToInt())
-        else getString(R.string.shutter_auto)
+        findViewById<Button>(R.id.shutter).text = when {
+            settings.shutterNs == CameraSettings.SHUTTER_SMART -> getString(R.string.shutter_smart)
+            settings.shutterNs > 0 -> getString(R.string.shutter_fixed, (1e9 / settings.shutterNs).roundToInt())
+            else -> getString(R.string.shutter_auto)
+        }
         findViewById<Button>(R.id.autoZoom).setText(if (zoomConfig.auto) R.string.auto_zoom_on else R.string.auto_zoom_off)
         findViewById<Button>(R.id.processVideo).setText(if (processor != null) R.string.process_cancel else R.string.process_video)
         val manager = getSystemService(CameraManager::class.java)
@@ -758,8 +762,8 @@ class MainActivity : AppCompatActivity() {
         const val PREF_TARGET = "targetClasses"
         const val PREF_LENS = "lens"
         const val PREF_TELEMETRY = "telemetry"
-        /** Shutter choices: automatic, then 1/250 … 1/2000 s. */
-        val SHUTTERS = listOf(0L, 4_000_000L, 2_000_000L, 1_000_000L, 500_000L)
+        /** Shutter choices: automatic, smart (follows the motion), then 1/250 … 1/2000 s. */
+        val SHUTTERS = listOf(0L, CameraSettings.SHUTTER_SMART, 4_000_000L, 2_000_000L, 1_000_000L, 500_000L)
         const val FORCED_4K60 = "3840x2160@60!"
     }
 }

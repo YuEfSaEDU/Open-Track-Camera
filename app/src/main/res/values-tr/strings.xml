@@ -60,4 +60,5 @@
     <string name="telemetry_on">Günlük: açık</string>
     <string name="telemetry_off">Günlük: kapalı</string>
     <string name="saved_with_log">Kaydedildi: Movies/OpenTrack, günlük Download/OpenTrack</string>
+    <string name="shutter_smart">Enstantane: akıllı</string>
 </resources>

@@ -23,7 +23,12 @@ import kotlin.math.ln
  * 3. ISO held at [isoSoftMax] (noise), the time gets longer up to the longest allowed (half the
  *    frame interval, e.g. 1/120 s at 60 fps).
  * 4. Longest time, ISO rising to its maximum.
- * The split is continuous, so the exposure never jumps between the stages. Pure logic, no Android.
+ * The split is continuous, so the exposure never jumps between the stages.
+ *
+ * Highlight protection: when the bright end of the picture (see [SceneMetering.highlight])
+ * would clip, the exposure is held lower, by at most [highlightMaxEv] stops below the
+ * brightness aim, so a sunlit cloud keeps its detail without the whole picture going dark.
+ * Pure logic, no Android.
  */
 class ShutterPriorityExposure(
     private val isoMin: Int,
@@ -38,6 +43,8 @@ class ShutterPriorityExposure(
     private val minExposureNs: Long = 1_000L,
     /** ISO beyond which a longer exposure time (up to the longest allowed) is preferred to more noise. */
     private val isoSoftMax: Int = 800,
+    /** Most the highlight protection may darken below the brightness aim (stops). */
+    private val highlightMaxEv: Double = 1.0,
 ) {
     /** Brightness (mean luma, 0..255) auto exposure produced; null until observed. */
     var targetLuma: Double? = null
@@ -103,11 +110,18 @@ class ShutterPriorityExposure(
      * [frameExposureNs]. Returns true when ISO or exposure time changed enough to be worth a
      * new capture request.
      */
-    fun update(meanLuma: Double, frameIso: Int, frameExposureNs: Long): Boolean {
+    fun update(meanLuma: Double, frameIso: Int, frameExposureNs: Long, highlight: Double? = null): Boolean {
         val target = aimLuma ?: return false
         if (maxExposureNs <= 0 || frameIso <= 0 || frameExposureNs <= 0) return false
         // A black (or white) frame still says which way to go: clamp instead of ignoring it.
-        val ratio = target / meanLuma.coerceIn(2.0, 253.0)
+        var ratio = target / meanLuma.coerceIn(2.0, 253.0)
+        if (highlight != null && highlight > 0) {
+            // Keep the bright end just under clipping (a clipped one says only "too bright":
+            // step down), but never more than highlightMaxEv below the aim.
+            val high = if (highlight >= 254) HIGHLIGHT_LUMA / 255.0 * 0.85 else HIGHLIGHT_LUMA / highlight
+            val floor = ratio * Math.pow(2.0, -highlightMaxEv / 2.2)
+            ratio = maxOf(minOf(ratio, high), floor)
+        }
         // Luma is gamma encoded (~2.2): the light ratio is the luma ratio to that power.
         val needed = frameIso.toDouble() * frameExposureNs * Math.pow(ratio, 2.2)
         val current = iso.toDouble() * exposureNs
@@ -118,6 +132,21 @@ class ShutterPriorityExposure(
         val oldExposure = exposureNs
         allocate(current * exp(logStep))
         return iso != oldIso || abs(exposureNs - oldExposure) > oldExposure * 0.01
+    }
+
+    /**
+     * Changes the preferred shutter time (smart shutter) keeping the same total exposure;
+     * returns true when ISO or time changed enough to be worth a new capture request.
+     */
+    fun setPreferred(shutterNs: Long): Boolean {
+        if (maxExposureNs <= 0) return false
+        val pref = shutterNs.coerceIn(1L, maxExposureNs)
+        if (pref == preferredExposureNs) return false
+        preferredExposureNs = pref
+        val oldIso = iso
+        val oldExposure = exposureNs
+        allocate(iso.toDouble() * exposureNs)
+        return iso != oldIso || abs(exposureNs - oldExposure) > oldExposure * 0.03
     }
 
     /** Splits a total exposure (ISO × ns) into ISO and time, following the stages above. */
@@ -147,6 +176,9 @@ class ShutterPriorityExposure(
     companion object {
         /** Settled auto exposure frames to learn from before taking over (~1 s at 10 Hz). */
         const val MIN_OBSERVATIONS = 10
+
+        /** Where highlight protection keeps the bright end of the picture (luma). */
+        const val HIGHLIGHT_LUMA = 245.0
 
         /** 18% grey in sRGB. */
         const val MIDDLE_GREY_LUMA = 118.0

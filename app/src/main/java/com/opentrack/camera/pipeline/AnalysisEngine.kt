@@ -11,10 +11,12 @@ import com.opentrack.camera.diag.Telemetry
 import com.opentrack.camera.detect.TargetClasses
 import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.Detection
+import com.opentrack.tracking.CropWindow
 import com.opentrack.tracking.DetectionPlanner
+import com.opentrack.tracking.ExposureMeter
+import com.opentrack.tracking.SceneMetering
 import com.opentrack.tracking.LumaFrame
 import com.opentrack.tracking.NeuralRun
-import com.opentrack.tracking.ShutterPriorityExposure
 import com.opentrack.tracking.SkyBlobDetector
 import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackPrediction
@@ -52,8 +54,18 @@ class AnalysisEngine(
     /** Which neural classes may become targets. */
     @Volatile var targetClasses = TargetClasses.AIRCRAFT
     @Volatile var neuralIntervalMs = 100L
-    /** Mean luma of the analysis frames, ~10 Hz, for the exposure loop (analysis thread). */
-    @Volatile var onSceneLuma: ((Double, Long) -> Unit)? = null
+    /**
+     * Exposure metering, ~10 Hz (analysis thread): brightness of the recorded crop with the
+     * target weighted in, the frame's timestamp, and the longest exposure time that keeps the
+     * subject sharp (the target, or without one the scene; null when nothing moves).
+     */
+    @Volatile var onSceneLuma: ((SceneMetering, Long, Long?) -> Unit)? = null
+
+    /** The live crop (source px), set by the render thread: what metering looks at. */
+    @Volatile var meterCrop: CropWindow? = null
+
+    /** Output width (px), for the motion blur limit. */
+    @Volatile var outputWidth = 1920
     /** While recording: detections and the tracker's state per analysis frame go here. */
     @Volatile var telemetry: Telemetry? = null
     @Volatile var lastAnalysisMs = 0.0
@@ -146,10 +158,11 @@ class AnalysisEngine(
             val tracking = tracker.prediction.state == TrackState.TRACKING
             val skyEvery = if (tracking) 12 else 3
             if (mode != Mode.NEURAL_ONLY && frameIndex % skyEvery == 0L) detections += skyBlob.detect(frame)
-            if (frameIndex % 6 == 0L) onSceneLuma?.invoke(ShutterPriorityExposure.meanLuma(frame), frame.timestampNs)
+            val meterNow = frameIndex % 6 == 0L
             frameIndex++
             visualMotion?.process(frame, lastTargetBox)
             val p = tracker.process(frame, detections, runs)
+            if (meterNow) meter(frame, p)
             // Mask the aircraft from the next motion estimate, so its own motion is not taken for shake.
             lastTargetBox = if (visualMotion != null && p.hasTarget) {
                 val c = visualMotion.poseAt(frame.timestampNs).toImage(p.worldAt(frame.timestampNs), sourceCenter)
@@ -160,6 +173,23 @@ class AnalysisEngine(
         } finally {
             freeBuffers.offer(frame.data)
         }
+    }
+
+    /** Exposure metering of [frame] (see [onSceneLuma]), with the tracker's state after it. */
+    private fun meter(frame: LumaFrame, p: TrackPrediction) {
+        val cb = onSceneLuma ?: return
+        val ts = frame.timestampNs
+        val crop = meterCrop
+        val framed = p.hasTarget && p.framable
+        val pose = motion.poseAt(ts)
+        val target = if (framed) pose.toImage(p.worldAt(ts), sourceCenter).let { Box(it.x, it.y, p.width, p.height) } else null
+        val m = ExposureMeter.measure(frame, crop, target)
+        val cropCenter = crop?.center ?: sourceCenter
+        val cropW = crop?.width ?: sourceW
+        // The subject must be sharp: the locked aircraft (a pan blurs the background, which is
+        // fine), otherwise the scene under the crop (hand shake).
+        val speed = ExposureMeter.imageSpeed(motion, ts, cropCenter, sourceCenter, cropW / 2, point = if (framed) p::worldAt else null)
+        cb(m, ts, ExposureMeter.blurLimitNs(speed, cropW, outputWidth))
     }
 
     /**

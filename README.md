@@ -52,6 +52,11 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   Hedef parlaklık, kameranın otomatik pozlaması oturduktan sonra öğrenilir (oturmazsa orta gri) ve
   **EV kaydırıcısıyla −3…+3 (1/3 adım)** kaydırılır; enstantane "oto" iken EV kameranın pozlama
   telafisidir. OIS açık / kamera EIS kapalı.
+  Parlaklık **kaydedilen kırpmada** ölçülür (kayda girmeyen yer/güneş etkilemez), kilitli hedef
+  ağırlıklıdır (parlak gökte uçak siluet kalmaz); kırpmanın parlak ucu patlıyorsa pozlama en fazla
+  1 durak düşürülür. **Enstantane: akıllı** seçeneğinde süre, hedefin (hedef yoksa sahnenin)
+  sensörde kayma hızından seçilir: çıkışta ~1.5 pikselden fazla bulanıklık olmayacak kadar kısa,
+  gerisinde olabildiğince uzun (1/4000 – 1/120 s), daha az ISO gürültüsü için.
 - **Otomatik zoom**: kullanıcının belirlediği min/max sınırlar içinde hedefi çıkışta sabit boyutta
   tutar; hedef yalnızca tahminle izlenirken veya kadrajın kenarına kayarken genişler, hedef yokken
   en geniş sınıra döner (yeniden yakalamak için). Ölü bölge ve hız sınırlarıyla "nefes alma" yapmaz.
