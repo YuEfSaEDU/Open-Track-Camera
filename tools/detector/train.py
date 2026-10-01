@@ -15,8 +15,12 @@ import math
 import os
 import time
 
-import tensorflow as tf
-from mediapipe_model_maker import object_detector, quantization
+# Colab sets MPLBACKEND to its notebook backend, which does not exist in this (separate) Python
+# environment; MediaPipe imports matplotlib and fails on it. A plain backend is enough here.
+os.environ["MPLBACKEND"] = "Agg"
+
+import tensorflow as tf  # noqa: E402
+from mediapipe_model_maker import object_detector, quantization  # noqa: E402
 
 MODELS = {
     "mobilenet_multi_avg_384": object_detector.SupportedModels.MOBILENET_MULTI_AVG_I384,

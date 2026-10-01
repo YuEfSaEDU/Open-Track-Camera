@@ -105,6 +105,8 @@ if not os.path.exists("/content/mm/bin/python"):
 site = "/content/mm/lib/python3.11/site-packages/nvidia"
 os.environ["LD_LIBRARY_PATH"] = ":".join(glob.glob(site + "/*/lib")) + ":" + os.environ.get("LD_LIBRARY_PATH", "")
 os.environ["PATH"] = ":".join(glob.glob(site + "/cuda_nvcc/bin")) + ":" + os.environ["PATH"]
+# Colab's notebook plotting backend does not exist in the Python 3.11 environment.
+os.environ["MPLBACKEND"] = "Agg"
 PY = "/content/mm/bin/python"
 !{PY} -c "import tensorflow as tf; g = tf.config.list_physical_devices('GPU'); print('TensorFlow', tf.__version__, 'GPU:', g); assert g, 'TensorFlow GPU görmüyor'"
 """),
