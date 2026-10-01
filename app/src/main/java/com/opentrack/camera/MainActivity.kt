@@ -19,6 +19,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
+import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -130,7 +131,7 @@ class MainActivity : AppCompatActivity() {
         targetClasses = TargetClasses.entries.firstOrNull { it.name == prefs.getString(PREF_TARGET, null) } ?: targetClasses
         outputLongSide = prefs.getInt(PREF_OUTPUT, 1920)
         codec = VideoCodec.entries.firstOrNull { it.name == prefs.getString(PREF_CODEC, null) } ?: codec
-        lastVideo = prefs.getString(PREF_LAST_VIDEO, null)?.let { android.net.Uri.parse(it) }
+        lastVideo = prefs.getString(PREF_LAST_VIDEO, null)?.toUri()
         lastCrash = CrashLog.last(this)
         if (lastCrash != null) Toast.makeText(this, R.string.crash_recorded, Toast.LENGTH_LONG).show()
         setContentView(R.layout.activity_main)
