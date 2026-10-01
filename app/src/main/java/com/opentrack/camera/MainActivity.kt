@@ -30,6 +30,7 @@ import com.opentrack.camera.camera.VendorKeys
 import com.opentrack.camera.diag.CrashLog
 import com.opentrack.camera.offline.VideoProcessor
 import com.opentrack.camera.detect.DetectorHost
+import com.opentrack.camera.detect.TargetClasses
 import com.opentrack.camera.pipeline.AnalysisEngine
 import com.opentrack.camera.pipeline.OverlayState
 import com.opentrack.camera.pipeline.PreviewMode
@@ -101,6 +102,7 @@ class MainActivity : AppCompatActivity() {
     private var previewMode = PreviewMode.WIDE
     private var autoLock = true
     private var detectorMode = AnalysisEngine.Mode.HYBRID
+    private var targetClasses = TargetClasses.AIRCRAFT
     private var outputWidth = 1920
     private var outputHeight = 1080
     private var lastStatusMs = 0L
@@ -109,6 +111,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         CrashLog.install(this)
         settings = settings.copy(shutterNs = prefs.getLong(PREF_SHUTTER, CameraSettings().shutterNs))
+        detectorMode = AnalysisEngine.Mode.entries.firstOrNull { it.name == prefs.getString(PREF_DETECTOR, null) } ?: detectorMode
+        targetClasses = TargetClasses.entries.firstOrNull { it.name == prefs.getString(PREF_TARGET, null) } ?: targetClasses
         lastCrash = CrashLog.last(this)
         if (lastCrash != null) Toast.makeText(this, R.string.crash_recorded, Toast.LENGTH_LONG).show()
         setContentView(R.layout.activity_main)
@@ -153,6 +157,14 @@ class MainActivity : AppCompatActivity() {
             val modes = AnalysisEngine.Mode.entries
             detectorMode = modes[(detectorMode.ordinal + 1) % modes.size]
             analysis?.mode = detectorMode
+            prefs.edit { putString(PREF_DETECTOR, detectorMode.name) }
+            refreshButtons()
+        }
+        findViewById<Button>(R.id.targetType).setOnClickListener {
+            val all = TargetClasses.entries
+            targetClasses = all[(targetClasses.ordinal + 1) % all.size]
+            analysis?.targetClasses = targetClasses
+            prefs.edit { putString(PREF_TARGET, targetClasses.name) }
             refreshButtons()
         }
         findViewById<Button>(R.id.focus).setOnClickListener {
@@ -267,6 +279,7 @@ class MainActivity : AppCompatActivity() {
         val analysisH = ((analysisW.toDouble() * srcH / srcW) / 2).roundToInt() * 2
         val engine = AnalysisEngine(tracker, detector, visual, motion, analysisW, analysisH, srcW.toDouble() / analysisW).also {
             it.mode = detectorMode
+            it.targetClasses = targetClasses
             it.onSceneLuma = { luma, ts -> camera?.onSceneLuma(luma, ts) }
         }
         analysis = engine
@@ -364,7 +377,10 @@ class MainActivity : AppCompatActivity() {
     private fun processVideo(uri: android.net.Uri) {
         stopPipeline()
         status.text = getString(R.string.processing, 0, 0.0)
-        val p = VideoProcessor(applicationContext, uri, sharedDetector(), zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) }, object : VideoProcessor.Listener {
+        val p = VideoProcessor(
+            applicationContext, uri, sharedDetector(), zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) },
+            targetClasses.labels, detectorMode != AnalysisEngine.Mode.NEURAL_ONLY,
+            object : VideoProcessor.Listener {
             override fun onProgress(fraction: Double, processingFps: Double) = runOnUiThread {
                 status.text = getString(R.string.processing, (fraction * 100).roundToInt(), processingFps) + " · " + (detector?.shortStatus() ?: "NN -")
             }
@@ -603,6 +619,12 @@ class MainActivity : AppCompatActivity() {
                 AnalysisEngine.Mode.SKY_ONLY -> R.string.detector_sky
             },
         )
+        findViewById<Button>(R.id.targetType).setText(
+            when (targetClasses) {
+                TargetClasses.AIRCRAFT -> R.string.target_aircraft
+                TargetClasses.VEHICLES -> R.string.target_vehicles
+            },
+        )
         findViewById<Button>(R.id.focus).setText(if (settings.focusInfinity) R.string.focus_inf_on else R.string.focus_inf_off)
         findViewById<Button>(R.id.shutter).text = if (settings.shutterNs > 0) getString(R.string.shutter_fixed, (1e9 / settings.shutterNs).roundToInt())
         else getString(R.string.shutter_auto)
@@ -626,6 +648,8 @@ class MainActivity : AppCompatActivity() {
         const val PREF_FORCE_4K60 = "force4k60"
         const val PREF_VENDOR = "vendorUnlock"
         const val PREF_SHUTTER = "shutterNs"
+        const val PREF_DETECTOR = "detectorMode"
+        const val PREF_TARGET = "targetClasses"
         /** Shutter choices: automatic, then 1/250 … 1/2000 s. */
         val SHUTTERS = listOf(0L, 4_000_000L, 2_000_000L, 1_000_000L, 500_000L)
         const val FORCED_4K60 = "3840x2160@60!"

@@ -12,9 +12,8 @@ import com.opentrack.tracking.Detection
 import com.opentrack.tracking.DetectionSource
 
 /**
- * Neural aircraft detector: MediaPipe EfficientDet-Lite (COCO), restricted to the
- * "airplane" class. Additional classes (birds, drones, ...) can be enabled later through
- * [labels] or a custom model.
+ * Neural detector: MediaPipe EfficientDet-Lite (COCO), restricted to the classes of a
+ * [TargetClasses] choice (aircraft only by default).
  */
 class AircraftDetector private constructor(private val detector: ObjectDetector) : AutoCloseable {
     private var closed = false
@@ -59,19 +58,21 @@ class AircraftDetector private constructor(private val detector: ObjectDetector)
 
     companion object {
         const val MODEL = "models/efficientdet_lite0.tflite"
-        val labels = listOf("airplane")
 
         /**
          * Creates the detector with [delegate]; throws when it is unavailable. Use it on the
          * thread that created it (see [DetectorHost]).
          */
-        fun create(context: Context, delegate: Delegate, scoreThreshold: Float = 0.35f): AircraftDetector {
+        fun create(context: Context, delegate: Delegate, labels: Collection<String>, scoreThreshold: Float = 0.35f): AircraftDetector {
             val options = ObjectDetector.ObjectDetectorOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath(MODEL).setDelegate(delegate).build())
                 .setRunningMode(RunningMode.IMAGE)
-                .setMaxResults(5)
+                // Room for an aircraft among cars and boats at an airshow.
+                .setMaxResults(10)
                 .setScoreThreshold(scoreThreshold)
-                .setCategoryAllowlist(labels)
+                // Only the chosen classes: suppression of overlapping boxes must not let, say, a
+                // "car" box hide an "airplane" box on the same jet when only aircraft are wanted.
+                .setCategoryAllowlist(labels.toList())
                 .build()
             return AircraftDetector(ObjectDetector.createFromOptions(context, options))
         }

@@ -22,6 +22,7 @@ class DetectorHost(private val context: Context) : AutoCloseable {
     private var detector: AircraftDetector? = null
     private var delegate: Delegate? = null
     private var gaveUp = false
+    private var labels: Set<String> = TargetClasses.AIRCRAFT.labels
 
     @Volatile var status: String = "henüz çalışmadı"
         private set
@@ -32,11 +33,11 @@ class DetectorHost(private val context: Context) : AutoCloseable {
     /**
      * Runs a detection on the detector thread and waits for it. Null when the detector failed
      * or is unavailable: the caller must not report such a run to the tracker, which would
-     * take it for "looked closely, no aircraft" and drop a correct track.
+     * take it for "looked closely, no aircraft" and drop a correct track. Only [labels] are kept.
      */
-    fun detect(bitmap: Bitmap, timestampNs: Long, region: Box): List<Detection>? =
+    fun detect(bitmap: Bitmap, timestampNs: Long, region: Box, labels: Set<String>): List<Detection>? =
         try {
-            thread.submit(Callable { detectHere(bitmap, timestampNs, region) }).get()
+            thread.submit(Callable { detectHere(bitmap, timestampNs, region, labels) }).get()?.filter { it.label in labels }
         } catch (e: Exception) {
             null
         }
@@ -47,7 +48,13 @@ class DetectorHost(private val context: Context) : AutoCloseable {
     /** One-line summary for the camera report. */
     fun report(): String = "Sinir ağı: $status, $runs çalışma, $failures hata" + (lastError?.let { ", son hata: $it" } ?: "")
 
-    private fun detectHere(bitmap: Bitmap, timestampNs: Long, region: Box): List<Detection>? {
+    private fun detectHere(bitmap: Bitmap, timestampNs: Long, region: Box, labels: Set<String>): List<Detection>? {
+        if (labels != this.labels) {
+            // Another target choice: the detector is built for its classes (rare, ~0.1 s).
+            runCatching { detector?.close() }
+            detector = null
+            this.labels = labels
+        }
         val d = ensure() ?: return null
         return try {
             val t0 = SystemClock.elapsedRealtimeNanos()
@@ -77,14 +84,14 @@ class DetectorHost(private val context: Context) : AutoCloseable {
         // CPU first: the bundled model is the int8 EfficientDet-Lite0, which MediaPipe's GPU
         // delegate does not support (on a Honor 200 Pro it failed with "ToTensorConverter: input
         // data size does not match" and gave poor tracking); the bench runs it on CPU too.
-        if (detector == null && !gaveUp) create(listOf(Delegate.CPU, Delegate.GPU))
+        if (detector == null && !gaveUp) create(if (delegate == Delegate.CPU) listOf(Delegate.CPU) else listOf(Delegate.CPU, Delegate.GPU))
         return detector
     }
 
     private fun create(delegates: List<Delegate>) {
         for (dg in delegates) {
             try {
-                detector = AircraftDetector.create(context, dg)
+                detector = AircraftDetector.create(context, dg, labels)
                 delegate = dg
                 status = "$dg"
                 return

@@ -7,6 +7,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import com.opentrack.camera.detect.DetectorHost
+import com.opentrack.camera.detect.TargetClasses
 import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.Detection
 import com.opentrack.tracking.DetectionPlanner
@@ -46,6 +47,8 @@ class AnalysisEngine(
     enum class Mode { HYBRID, NEURAL_ONLY, SKY_ONLY }
 
     @Volatile var mode = Mode.HYBRID
+    /** Which neural classes may become targets. */
+    @Volatile var targetClasses = TargetClasses.AIRCRAFT
     @Volatile var neuralIntervalMs = 100L
     /** Mean luma of the analysis frames, ~10 Hz, for the exposure loop (analysis thread). */
     @Volatile var onSceneLuma: ((Double, Long) -> Unit)? = null
@@ -105,7 +108,7 @@ class AnalysisEngine(
             try {
                 if (released) return@execute
                 val t0 = SystemClock.elapsedRealtimeNanos()
-                val dets = det.detect(bmp, timestampNs, area) ?: return@execute
+                val dets = det.detect(bmp, timestampNs, area, targetClasses.labels) ?: return@execute
                 lastNeuralMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6
                 neuralResults.add(NeuralRun(timestampNs, region, NEURAL_INPUT) to dets)
             } catch (e: Exception) {

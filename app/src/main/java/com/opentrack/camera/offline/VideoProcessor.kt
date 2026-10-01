@@ -64,6 +64,10 @@ class VideoProcessor(
     private val zoomConfig: ZoomConfig,
     /** Stabilizer settings for [fps] → [StabilizerConfig]. */
     private val stabilizer: (fps: Int) -> StabilizerConfig,
+    /** Neural classes that may become targets. */
+    private val targetLabels: Set<String>,
+    /** Sky blob detector on (detector mode hybrid / sky). */
+    private val skyEnabled: Boolean,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -272,13 +276,13 @@ class VideoProcessor(
                         val area = region ?: Box(srcW / 2.0, srcH / 2.0, srcW.toDouble(), srcH.toDouble())
                         // Runs on the detector's own thread: the GPU delegate must not touch this thread's EGL context.
                         // A failed run is not reported: it is not evidence of "no aircraft here".
-                        detector.detect(bmp, ts, area)?.let {
+                        detector.detect(bmp, ts, area, targetLabels)?.let {
                             dets += it
                             runs += NeuralRun(ts, region, ROI)
                         }
                     }
                     val skyEvery = if (tracker.prediction.state == TrackState.TRACKING) 12 else 3
-                    if (frame % skyEvery == 0L) dets += sky.detect(lf)
+                    if (skyEnabled && frame % skyEvery == 0L) dets += sky.detect(lf)
                     val p = tracker.process(lf, dets, runs)
                     val neural = dets.filter { it.source == com.opentrack.tracking.DetectionSource.NEURAL }
                     pending[ts] = "${p.state}|" + String.format(Locale.US, "%.3f,%s,%d,", framing.zoom, tracker.lastEvent, neural.size) +

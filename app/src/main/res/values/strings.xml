@@ -10,6 +10,8 @@
     <string name="focus_inf_off">Focus: auto</string>
     <string name="shutter_fixed">Shutter: ~1/%d</string>
     <string name="shutter_auto">Shutter: auto</string>
+    <string name="target_aircraft">Target: aircraft</string>
+    <string name="target_vehicles">Target: all vehicles</string>
     <string name="detector_hybrid">Detector: hybrid</string>
     <string name="detector_neural">Detector: neural</string>
     <string name="detector_sky">Detector: sky</string>
