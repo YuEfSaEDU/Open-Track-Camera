@@ -173,6 +173,8 @@ fun main(args: Array<String>) {
             pending++
         }
         roiResults.removeAll { d -> (d.timestampNs + latencyNs <= t).also { if (it && neuralEnabled) dets += d } }
+        // Simulates a detector that fails on the device: runs are reported, results never arrive.
+        if (a.flag("neural-fails")) dets.removeAll { it.source == DetectionSource.NEURAL }
         val runs = ArrayList<NeuralRun>()
         pendingRuns.removeAll { r -> (r.timestampNs + latencyNs <= t).also { if (it && neuralEnabled) runs += r } }
         val nNeural = dets.size

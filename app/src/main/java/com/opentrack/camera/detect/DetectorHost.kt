@@ -29,19 +29,26 @@ class DetectorHost(private val context: Context) : AutoCloseable {
     @Volatile private var failures = 0L
     @Volatile private var lastError: String? = null
 
-    /** Runs a detection on the detector thread and waits for it; empty on any failure. */
-    fun detect(bitmap: Bitmap, timestampNs: Long, region: Box): List<Detection> =
+    /**
+     * Runs a detection on the detector thread and waits for it. Null when the detector failed
+     * or is unavailable: the caller must not report such a run to the tracker, which would
+     * take it for "looked closely, no aircraft" and drop a correct track.
+     */
+    fun detect(bitmap: Bitmap, timestampNs: Long, region: Box): List<Detection>? =
         try {
             thread.submit(Callable { detectHere(bitmap, timestampNs, region) }).get()
         } catch (e: Exception) {
-            emptyList()
+            null
         }
+
+    /** Short status for the screen: delegate, runs and failures. */
+    fun shortStatus(): String = "NN $status $runs/$failures"
 
     /** One-line summary for the camera report. */
     fun report(): String = "Sinir ağı: $status, $runs çalışma, $failures hata" + (lastError?.let { ", son hata: $it" } ?: "")
 
-    private fun detectHere(bitmap: Bitmap, timestampNs: Long, region: Box): List<Detection> {
-        val d = ensure() ?: return emptyList()
+    private fun detectHere(bitmap: Bitmap, timestampNs: Long, region: Box): List<Detection>? {
+        val d = ensure() ?: return null
         return try {
             val t0 = SystemClock.elapsedRealtimeNanos()
             d.detect(bitmap, timestampNs, region).also {
@@ -58,7 +65,7 @@ class DetectorHost(private val context: Context) : AutoCloseable {
                 detector = null
                 create(listOf(Delegate.CPU))
             }
-            emptyList()
+            null
         }
     }
 

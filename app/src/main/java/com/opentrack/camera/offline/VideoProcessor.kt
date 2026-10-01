@@ -257,8 +257,11 @@ class VideoProcessor(
                         bmp.copyPixelsFromBuffer(target.read())
                         val area = region ?: Box(srcW / 2.0, srcH / 2.0, srcW.toDouble(), srcH.toDouble())
                         // Runs on the detector's own thread: the GPU delegate must not touch this thread's EGL context.
-                        dets += detector.detect(bmp, ts, area)
-                        runs += NeuralRun(ts, region, ROI)
+                        // A failed run is not reported: it is not evidence of "no aircraft here".
+                        detector.detect(bmp, ts, area)?.let {
+                            dets += it
+                            runs += NeuralRun(ts, region, ROI)
+                        }
                     }
                     val skyEvery = if (tracker.prediction.state == TrackState.TRACKING) 12 else 3
                     if (frame % skyEvery == 0L) dets += sky.detect(lf)

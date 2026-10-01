@@ -365,7 +365,7 @@ class MainActivity : AppCompatActivity() {
         status.text = getString(R.string.processing, 0, 0.0)
         val p = VideoProcessor(applicationContext, uri, sharedDetector(), zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) }, object : VideoProcessor.Listener {
             override fun onProgress(fraction: Double, processingFps: Double) = runOnUiThread {
-                status.text = getString(R.string.processing, (fraction * 100).roundToInt(), processingFps)
+                status.text = getString(R.string.processing, (fraction * 100).roundToInt(), processingFps) + " · " + (detector?.shortStatus() ?: "NN -")
             }
 
             override fun onFinished(output: android.net.Uri?, error: String?) = runOnUiThread {

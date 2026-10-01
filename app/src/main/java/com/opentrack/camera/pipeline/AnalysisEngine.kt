@@ -105,7 +105,7 @@ class AnalysisEngine(
             try {
                 if (released) return@execute
                 val t0 = SystemClock.elapsedRealtimeNanos()
-                val dets = det.detect(bmp, timestampNs, area)
+                val dets = det.detect(bmp, timestampNs, area) ?: return@execute
                 lastNeuralMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6
                 neuralResults.add(NeuralRun(timestampNs, region, NEURAL_INPUT) to dets)
             } catch (e: Exception) {
