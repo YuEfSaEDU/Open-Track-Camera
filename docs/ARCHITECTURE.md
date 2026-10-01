@@ -490,8 +490,9 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
    hedef çevresinden tam çözünürlükte bir luma yaması üzerinde yapılırsa küçük hedeflerde alt-piksel
    hassasiyet ve daha az kayma (şu an 640x360 analiz görüntüsünde).
 4. **Asenkron geri okuma (PBO)** ile render thread'deki `glReadPixels` beklemesini kaldırmak.
-5. **Uçak odaklı model**: uzak/küçük uçak veri setiyle eğitilmiş dedektör, sonra helikopter, drone,
-   kuş gibi sınıflar.
+5. **Uçak odaklı model**: eğitim hattı hazır (`tools/detector`, Colab not defteri): uçak, helikopter,
+   drone, kuş; COCO + Open Images + askeri uçak seti + drone seti + sentetik küçük hedefler. Model gelince
+   test videolarında EfficientDet-Lite0 ile karşılaştırılıp uygulamaya eklenecek.
 6. **Hibrit zoom**: otomatik zoom kırpma sınırına dayanınca lens zumunu kontrollü değiştirmek.
 7. **ADS-B entegrasyonu**: yakındaki uçakların konumundan hedefin ekrandaki yerini tahmin edip
    ön-kilit, kaybolunca arama yönü.

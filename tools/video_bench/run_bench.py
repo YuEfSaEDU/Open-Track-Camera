@@ -30,6 +30,8 @@ from shake_metric import ShakeMeter, hf_rms
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MODEL = os.path.join(ROOT, "app/src/main/assets/models/efficientdet_lite0.tflite")
+LABELS = ["airplane"]  # target classes (--labels)
+SCORE = 0.35
 BENCH = os.path.join(ROOT, "bench/build/install/bench/bin/bench")
 AW = 640  # analysis width, as in MainActivity
 
@@ -80,7 +82,7 @@ def create_detector():
     from mediapipe.tasks.python import BaseOptions, vision
 
     opts = vision.ObjectDetectorOptions(
-        base_options=BaseOptions(model_asset_path=MODEL), score_threshold=0.35, max_results=5, category_allowlist=["airplane"]
+        base_options=BaseOptions(model_asset_path=MODEL), score_threshold=SCORE, max_results=5, category_allowlist=LABELS
     )
     return vision.ObjectDetector.create_from_options(opts)
 
@@ -393,7 +395,16 @@ def main():
     ap.add_argument("--sheet-every", type=float, default=3.0)
     ap.add_argument("--gt-dir", default=None, help="directory with <name>.gt.csv from gt_tiles.py (default: --out)")
     ap.add_argument("--live", action="store_true", help="zoomed (ROI) neural detection around the track, as in the app")
+    ap.add_argument("--model", default=None, help="detector .tflite (default: the app's EfficientDet-Lite0)")
+    ap.add_argument("--labels", default="airplane", help="comma-separated target classes of --model")
+    ap.add_argument("--score", type=float, default=0.35)
+    ap.add_argument("--roi-input", type=int, default=320, help="side of the zoomed detector regions (model input)")
     a = ap.parse_args()
+    global MODEL, LABELS, SCORE, ROI_INPUT
+    MODEL = a.model or MODEL
+    LABELS = a.labels.split(",")
+    SCORE = a.score
+    ROI_INPUT = a.roi_input
     os.makedirs(a.out, exist_ok=True)
     summary = {}
     for v in a.videos:
