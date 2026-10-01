@@ -154,8 +154,10 @@ class CameraController(
             manualActive = true
             manualShutterNs = shutter
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
-            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, shutter)
-            b.set(CaptureRequest.SENSOR_SENSITIVITY, ae!!.iso)
+            // ISO first; the chosen shutter time is a ceiling, shortened only when ISO is at
+            // its minimum and the scene is still too bright.
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, ae!!.exposureNs)
+            b.set(CaptureRequest.SENSOR_SENSITIVITY, ae.iso)
             b.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / profile.fps)
         } else {
             manualActive = false
@@ -177,7 +179,7 @@ class CameraController(
         }
     }
 
-    private val ae = profile.isoRange?.let { ShutterPriorityExposure(it.lower, it.upper) }
+    private val ae = profile.isoRange?.let { ShutterPriorityExposure(it.lower, it.upper, minExposureNs = profile.exposureRangeNs?.lower ?: 1_000L) }
     private var manualActive = false
     private var manualShutterNs = 0L
 
@@ -196,7 +198,7 @@ class CameraController(
     fun onSceneLuma(mean: Double) = handler.post {
         val e = ae ?: return@post
         if (manualActive) {
-            if (e.update(mean) != null) applySettings(settings)
+            if (e.update(mean)) applySettings(settings)
         } else {
             e.observeAuto(mean)
             // Shutter priority was requested before auto exposure had settled: switch now.

@@ -5,14 +5,17 @@ import kotlin.math.exp
 import kotlin.math.ln
 
 /**
- * Shutter priority exposure: a fixed short exposure time (against motion blur: a stabilized
- * crop shows every frame's blur, while the shake that caused it is gone) with the sensitivity
- * (ISO) adjusted continuously to keep the brightness the camera's own auto exposure chose.
+ * Shutter priority exposure: a short exposure time (against motion blur: a stabilized crop
+ * shows every frame's blur, while the shake that caused it is gone) with the sensitivity (ISO)
+ * adjusted continuously to keep the brightness the camera's own auto exposure chose.
  *
- * Camera2 cannot cap the auto exposure time, so ISO is driven here from the mean luma of the
- * analysis frames. While the camera's auto exposure runs, [observeAuto] learns the brightness
- * it aims for; in shutter priority, [update] moves ISO towards that brightness in damped,
- * rate-limited steps (no flicker, no pumping on a passing cloud). Pure logic, no Android.
+ * Camera2 cannot cap the auto exposure time, so exposure is driven here from the mean luma of
+ * the analysis frames. While the camera's auto exposure runs, [observeAuto] learns the
+ * brightness it aims for; in shutter priority, [update] moves the total exposure (ISO × time)
+ * towards that brightness in damped, rate-limited steps (no flicker, no pumping on a passing
+ * cloud). ISO moves first; the chosen shutter time is a ceiling: only when ISO is already at
+ * its minimum and the scene is still too bright (bright sun at 1/500 s) does the exposure time
+ * get shorter, and it returns to the chosen time before ISO rises again. Pure logic, no Android.
  */
 class ShutterPriorityExposure(
     private val isoMin: Int,
@@ -23,6 +26,8 @@ class ShutterPriorityExposure(
     private val maxStep: Double = 1.25,
     /** Errors smaller than this (fraction of the target) are ignored. */
     private val deadband: Double = 0.04,
+    /** Shortest exposure time the sensor supports (ns). */
+    private val minExposureNs: Long = 1_000L,
 ) {
     /** Brightness (mean luma, 0..255) auto exposure produced; null until observed. */
     var targetLuma: Double? = null
@@ -30,6 +35,13 @@ class ShutterPriorityExposure(
 
     var iso: Int = isoMin
         private set
+
+    /** Exposure time to use (ns): the chosen shutter time, or shorter when ISO cannot go lower. */
+    var exposureNs: Long = 0L
+        private set
+
+    /** The chosen shutter time: the longest exposure used (motion blur limit). */
+    private var maxExposureNs: Long = 0L
 
     /** Auto exposure is running: learn its brightness (slow average, ignores single frames). */
     fun observeAuto(meanLuma: Double) {
@@ -39,25 +51,37 @@ class ShutterPriorityExposure(
 
     /** Entering shutter priority: same light as the last auto frame, at the new exposure time. */
     fun start(autoIso: Int, autoExposureNs: Long, shutterNs: Long) {
-        val i = if (autoIso > 0 && autoExposureNs > 0) autoIso.toDouble() * autoExposureNs / shutterNs else isoMin.toDouble()
-        iso = i.toInt().coerceIn(isoMin, isoMax)
+        maxExposureNs = shutterNs
+        val total = if (autoIso > 0 && autoExposureNs > 0) autoIso.toDouble() * autoExposureNs else isoMin.toDouble() * shutterNs
+        allocate(total)
     }
 
     /**
-     * New measurement in shutter priority. Returns the ISO to use when it changed enough to
-     * be worth a new capture request, else null.
+     * New measurement in shutter priority. Returns true when ISO or exposure time changed
+     * enough to be worth a new capture request.
      */
-    fun update(meanLuma: Double): Int? {
-        val target = targetLuma ?: return null
-        if (meanLuma <= 1.0) return null
+    fun update(meanLuma: Double): Boolean {
+        val target = targetLuma ?: return false
+        if (meanLuma <= 1.0 || maxExposureNs <= 0) return false
         val ratio = target / meanLuma
-        if (abs(ratio - 1) < deadband) return null
+        if (abs(ratio - 1) < deadband) return false
         // Luma is gamma encoded (~2.2): the light ratio is the luma ratio to that power.
         val logStep = (gain * 2.2 * ln(ratio)).coerceIn(-ln(maxStep), ln(maxStep))
-        val next = (iso * exp(logStep)).toInt().coerceIn(isoMin, isoMax)
-        if (next == iso) return null
-        iso = next
-        return next
+        val oldIso = iso
+        val oldExposure = exposureNs
+        allocate(iso.toDouble() * exposureNs * exp(logStep))
+        return iso != oldIso || abs(exposureNs - oldExposure) > oldExposure * 0.01
+    }
+
+    /** Splits a total exposure (ISO × ns) into ISO first, then a shorter time below minimum ISO. */
+    private fun allocate(total: Double) {
+        if (total >= isoMin.toDouble() * maxExposureNs) {
+            exposureNs = maxExposureNs
+            iso = (total / maxExposureNs).toInt().coerceIn(isoMin, isoMax)
+        } else {
+            iso = isoMin
+            exposureNs = (total / isoMin).toLong().coerceIn(minOf(minExposureNs, maxExposureNs), maxExposureNs)
+        }
     }
 
     companion object {

@@ -8,7 +8,7 @@
     <string name="release_target">Release target</string>
     <string name="focus_inf_on">Focus: ∞</string>
     <string name="focus_inf_off">Focus: auto</string>
-    <string name="shutter_fixed">Shutter: 1/%d</string>
+    <string name="shutter_fixed">Shutter: ≤1/%d</string>
     <string name="shutter_auto">Shutter: auto</string>
     <string name="detector_hybrid">Detector: hybrid</string>
     <string name="detector_neural">Detector: neural</string>

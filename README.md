@@ -44,7 +44,10 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   pan'daki eğilme ve titremedeki "jöle" etkisi kayıtta GPU'da düzeltilir.
 - **Uçak fotoğrafçılığı ayarları**: sonsuza sabit odak (gökyüzünde AF aramasını önler), EV,
   enstantane önceliği (oto, 1/250–1/2000 s; varsayılan 1/500) — ISO, kameranın otomatik pozlamasının
-  parlaklığını koruyacak şekilde sürekli ayarlanır; stabilize kırpmada kare içi hareket bulanıklığını önler, OIS açık / kamera EIS kapalı.
+  parlaklığını koruyacak şekilde sürekli ayarlanır; stabilize kırpmada kare içi hareket bulanıklığını önler.
+  Seçilen enstantane bir üst sınırdır: ISO en altta (ör. 100) olduğu halde görüntü hâlâ parlaksa
+  enstantane kısalır (1/1000, 1/2000…), ışık azalınca önce seçilen değere döner, ISO sonra yükselir.
+  OIS açık / kamera EIS kapalı.
 - **Otomatik zoom**: kullanıcının belirlediği min/max sınırlar içinde hedefi çıkışta sabit boyutta
   tutar; hedef yalnızca tahminle izlenirken veya kadrajın kenarına kayarken genişler, hedef yokken
   en geniş sınıra döner (yeniden yakalamak için). Ölü bölge ve hız sınırlarıyla "nefes alma" yapmaz.
