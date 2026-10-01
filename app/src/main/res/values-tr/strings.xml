@@ -63,4 +63,6 @@
     <string name="shutter_smart">Enstantane: akıllı</string>
     <string name="lens_multi">Lens: çoklu %1$.1f–%2$.0fx%3$s</string>
     <string name="output_res">Çıkış: %s</string>
+    <string name="ois_on">OIS: açık</string>
+    <string name="ois_off">OIS: kapalı</string>
 </resources>

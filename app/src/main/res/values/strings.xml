@@ -66,4 +66,6 @@
     <string name="shutter_smart">Shutter: smart</string>
     <string name="lens_multi">Lens: multi %1$.1f–%2$.0fx%3$s</string>
     <string name="output_res">Output: %s</string>
+    <string name="ois_on">OIS: on</string>
+    <string name="ois_off">OIS: off</string>
 </resources>

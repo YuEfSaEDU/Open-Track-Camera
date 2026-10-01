@@ -121,7 +121,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         CrashLog.install(this)
-        settings = settings.copy(shutterNs = prefs.getLong(PREF_SHUTTER, CameraSettings().shutterNs))
+        settings = settings.copy(shutterNs = prefs.getLong(PREF_SHUTTER, CameraSettings().shutterNs), ois = prefs.getBoolean(PREF_OIS, false))
         detectorMode = AnalysisEngine.Mode.entries.firstOrNull { it.name == prefs.getString(PREF_DETECTOR, null) } ?: detectorMode
         targetClasses = TargetClasses.entries.firstOrNull { it.name == prefs.getString(PREF_TARGET, null) } ?: targetClasses
         outputLongSide = prefs.getInt(PREF_OUTPUT, 1920)
@@ -199,6 +199,10 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.resolution).setOnClickListener { cycleResolution() }
         findViewById<Button>(R.id.lens).setOnClickListener { cycleLens() }
+        findViewById<Button>(R.id.ois).setOnClickListener {
+            prefs.edit { putBoolean(PREF_OIS, !settings.ois) }
+            updateSettings(settings.copy(ois = !settings.ois))
+        }
         findViewById<Button>(R.id.outputRes).setOnClickListener {
             if (recorder?.isRecording == true) return@setOnClickListener
             outputLongSide = if (outputLongSide == 1920) 2560 else 1920
@@ -699,7 +703,7 @@ class MainActivity : AppCompatActivity() {
     private fun logSettings() {
         val t = telemetry ?: return
         val line = t.line("set").i("shutterNs", settings.shutterNs).n("ev", settings.evThirds / 3.0, 2).b("focusInf", settings.focusInfinity)
-            .n("cameraZoom", settings.zoomRatio.toDouble(), 2).s("stab", stabPreset.name).b("horizon", horizonLock)
+            .n("cameraZoom", settings.zoomRatio.toDouble(), 2).b("ois", settings.ois).s("stab", stabPreset.name).b("horizon", horizonLock)
             .b("autoZoom", zoomConfig.auto).n("zoomMin", zoomConfig.minZoom, 2).n("zoomMax", zoomConfig.maxZoom, 2).n("cropZoom", cropZoom, 2)
             .s("detector", detectorMode.name).s("target", targetClasses.name).b("autoLock", autoLock).s("view", previewMode.name)
         // Only when something changed (the line without its timestamp is the comparison key).
@@ -734,6 +738,10 @@ class MainActivity : AppCompatActivity() {
     private fun refreshButtons() {
         logSettings()
         findViewById<Button>(R.id.lens).text = lensLabel()
+        findViewById<Button>(R.id.ois).apply {
+            visibility = if (profile?.hasOis == true) android.view.View.VISIBLE else android.view.View.GONE
+            setText(if (settings.ois) R.string.ois_on else R.string.ois_off)
+        }
         findViewById<Button>(R.id.outputRes).text = getString(R.string.output_res, if (outputLongSide >= 2560) "1440p" else "1080p")
         findViewById<Button>(R.id.telemetry).setText(if (prefs.getBoolean(PREF_TELEMETRY, true)) R.string.telemetry_on else R.string.telemetry_off)
         findViewById<Button>(R.id.viewMode).setText(if (previewMode == PreviewMode.WIDE) R.string.view_wide else R.string.view_output)
@@ -780,6 +788,7 @@ class MainActivity : AppCompatActivity() {
         const val PREF_DETECTOR = "detectorMode"
         const val PREF_TARGET = "targetClasses"
         const val PREF_LENS = "lens"
+        const val PREF_OIS = "ois"
         const val PREF_OUTPUT = "outputLongSide"
         const val PREF_TELEMETRY = "telemetry"
         /** Shutter choices: automatic, smart (follows the motion), then 1/250 … 1/2000 s. */

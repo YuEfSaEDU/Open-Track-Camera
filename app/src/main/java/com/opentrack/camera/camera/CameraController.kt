@@ -158,7 +158,10 @@ class CameraController(
         // Our own crop-based stabilization needs the full, unwarped sensor stream.
         b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
         if (profile.hasOis) {
-            b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+            b.set(
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                if (s.ois) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF,
+            )
         }
         b.set(CaptureRequest.CONTROL_ZOOM_RATIO, s.zoomRatio.coerceIn(profile.zoomRange.lower, profile.zoomRange.upper))
 
@@ -326,6 +329,7 @@ class CameraController(
                     .i("afState", result.get(CaptureResult.CONTROL_AF_STATE) ?: -1)
                     .n("focus", (result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: -1f).toDouble(), 2)
                     .i("skew", skew)
+                    .i("ois", result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE) ?: -1)
                 // Which physical lens a multi-camera actually streams from (it may switch with zoom).
                 result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { line.s("phys", it) }
                 line.send()

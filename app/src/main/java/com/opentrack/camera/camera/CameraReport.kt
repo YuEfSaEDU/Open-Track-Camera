@@ -60,6 +60,10 @@ object CameraReport {
             "zoom ${c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)}, sensör yönü ${c.get(CameraCharacteristics.SENSOR_ORIENTATION)}")
         appendLine("  yetenekler: ${c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.joinToString { capability(it) }}")
         appendLine("  AE fps aralıkları: ${c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.joinToString()}")
+        val ois = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+        val oisData = c.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES)?.contains(CameraMetadata.STATISTICS_OIS_DATA_MODE_ON) == true
+        appendLine("  OIS: ${if (ois) "var" else "yok"}, OIS kayması verisi: ${if (oisData) "var" else "yok"}, zaman damgası: " +
+            if (c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) == CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) "realtime" else "bilinmiyor")
         val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return
         for ((name, cls) in listOf("SurfaceTexture" to SurfaceTexture::class.java, "MediaRecorder" to MediaRecorder::class.java)) {
             val sizes = map.getOutputSizes(cls)?.filter { it.width >= 1920 }?.sortedByDescending { it.width * it.height } ?: continue

@@ -5,7 +5,7 @@
 ```
                    ┌──────────── camera thread ────────────┐
  Camera2 (4K60) ──►│ TEMPLATE_RECORD, fps [60,60], ∞ odak, │
-                   │ OIS açık, kamera EIS kapalı           │
+                   │ OIS kapalı*, kamera EIS kapalı         │
                    └───────────────┬───────────────────────┘
                                    │ SurfaceTexture (OES doku)
             ┌──────────────────────▼──────────── render thread (GL) ──────────────────────────┐
@@ -270,6 +270,17 @@ yüksek hız modu 120/240). Çözüm: kendi kamerayla 4K60 çek, sonra uygulamad
   karşılaştırılabilsin diye.
 - Jiroskop yok: rolling shutter düzeltmesi yapılmaz; telefonun kendi stabilizasyonu kapalı
   çekilmiş videolar en iyi sonucu verir. Gerçek video testlerindeki ölçümler bu durumu temsil eder.
+
+## OIS
+
+Jiroskop stabilizasyonu, görüntünün kameranın ölçülen dönüşü kadar kaydığını varsayar
+(`GyroMotionModel`). OIS açıkken lens titremenin bir kısmını optik olarak zaten giderir; jiroskop
+bunu görmez, düzeltme o kısmı ters yönde görüntüye geri ekler (küçük el titremesi kayıtta kalır,
+rolling shutter düzeltmesi de yanlış olur). Bu yüzden OIS varsayılan kapalı (`CameraSettings.ois`).
+Kısa enstantanede OIS'in bulanıklığa katkısı zaten küçük; akıllı enstantane jiroskop hızını dikkate
+alır. Günlükteki `cam.ois` HAL'in isteği uygulayıp uygulamadığını, kamera raporu OIS ve OIS kayma
+verisi (`STATISTICS_OIS_DATA_MODE`) desteğini gösterir; kayma verisi varsa ileride OIS açıkken
+düzeltmeden çıkarılabilir.
 
 ## Pozlama (`ShutterPriorityExposure`, `ExposureMeter`, `SmartShutter`)
 

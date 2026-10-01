@@ -20,6 +20,13 @@ data class CameraSettings(
      */
     val shutterNs: Long = 2_000_000L, // 1/500 s
     val aeLock: Boolean = false,
+    /**
+     * Optical image stabilization. Off by default: the gyroscope stabilization corrects the
+     * camera's whole measured rotation; with OIS on, the lens has already removed part of the
+     * shake, and correcting it again puts that part back, mirrored (the gyro does not see the
+     * lens). With a short shutter OIS adds little against blur anyway.
+     */
+    val ois: Boolean = false,
 ) {
     companion object {
         /**
