@@ -42,4 +42,10 @@
     <string name="vendor_unlock_off">Üretici kilidi: kapalı</string>
     <string name="vendor_unlock_on">Üretici kilidi: deneniyor</string>
     <string name="vendor_unlock_hint">Deneysel: üreticinin kamera anahtarları gönderiliyor. Sonra Akış\'tan 4K@60! seçip durum satırındaki fps\'e bakın.</string>
+    <string name="process_video">Galeriden işle</string>
+    <string name="process_cancel">İşlemeyi iptal et</string>
+    <string name="processing">Video işleniyor: %%%1$d (%2$.0f fps)</string>
+    <string name="processing_done">Movies/OpenTrack klasörüne kaydedildi</string>
+    <string name="processing_failed">İşleme başarısız: %s</string>
+    <string name="processing_cancelled">İşleme iptal edildi</string>
 </resources>

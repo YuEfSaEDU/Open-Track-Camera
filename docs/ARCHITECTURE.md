@@ -199,6 +199,20 @@ küçültülünce sinir ağı onu göremez. Oysa düz gökyüzünde çok belirgi
 GPU tarafındaki 3x3 kutu filtre, 6x küçültmede tek piksellik hedeflerin örnekleme aralığına düşüp
 kaybolmasını engeller.
 
+## Galeriden işleme (`VideoProcessor`)
+
+Bazı üreticiler (ör. Honor 200 Pro) diğer uygulamalara normal oturumda en fazla 30 fps veriyor;
+4K60 yalnızca kendi kamera uygulamalarında var (kamera raporu: tüm akışlar @30, yalnızca 1080p
+yüksek hız modu 120/240). Çözüm: kendi kamerayla 4K60 çek, sonra uygulamada işle.
+
+- `MediaExtractor` + `MediaCodec` çözücü → `SurfaceTexture` (OES); canlı hattaki parçalar aynen:
+  luma geri okuma, `VisualMotionEstimator`, `DetectionPlanner` ile yakınlaştırılmış sinir ağı tespiti,
+  `TargetTracker`, `FramingController`, `YuvRing`, `LookaheadFramer` → enkoder.
+- Her kare işlenir (canlıdaki gibi atlanmaz), tespitler aynı kareye uygulanır (gecikme yok).
+- Video döndürme bilgisi (`rotation`) `FrameRenderer` dönüşüyle uygulanır. Ses izi kopyalanır.
+- Jiroskop yok: rolling shutter düzeltmesi yapılmaz; telefonun kendi stabilizasyonu kapalı
+  çekilmiş videolar en iyi sonucu verir. Gerçek video testlerindeki ölçümler bu durumu temsil eder.
+
 ## Kayıt
 
 - Enkoder yüzeyi aynı EGL bağlamına (`EGL_RECORDABLE_ANDROID`) bağlanır; her kare

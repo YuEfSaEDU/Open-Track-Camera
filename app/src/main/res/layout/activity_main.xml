@@ -91,6 +91,7 @@
                 android:textColor="#FFFFFF"
                 android:textSize="12sp" />
 
+            <Button android:id="@+id/processVideo" style="@style/ControlToggle" />
             <Button android:id="@+id/viewMode" style="@style/ControlToggle" />
             <Button android:id="@+id/autoLock" style="@style/ControlToggle" />
             <Button android:id="@+id/autoZoom" style="@style/ControlToggle" />

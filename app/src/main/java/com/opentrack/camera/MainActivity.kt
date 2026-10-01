@@ -14,6 +14,8 @@ import android.widget.Button
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
@@ -25,6 +27,7 @@ import com.opentrack.camera.camera.CameraProfile
 import com.opentrack.camera.camera.CameraReport
 import com.opentrack.camera.camera.CameraSettings
 import com.opentrack.camera.camera.VendorKeys
+import com.opentrack.camera.offline.VideoProcessor
 import com.opentrack.camera.detect.AircraftDetector
 import com.opentrack.camera.pipeline.AnalysisEngine
 import com.opentrack.camera.pipeline.OverlayState
@@ -54,6 +57,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recordButton: Button
 
     private var profile: CameraProfile? = null
+    /** Gallery video being processed (the camera is closed meanwhile). */
+    private var processor: VideoProcessor? = null
+    private val pickVideo = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let { processVideo(it) } }
     private val prefs by lazy { getSharedPreferences("camera", MODE_PRIVATE) }
     private var camera: CameraController? = null
     private var pipeline: RenderPipeline? = null
@@ -151,6 +157,14 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.resolution).setOnClickListener { cycleResolution() }
         findViewById<Button>(R.id.cameraReport).setOnClickListener { shareCameraReport() }
+        findViewById<Button>(R.id.processVideo).setOnClickListener {
+            val running = processor
+            when {
+                running != null -> running.cancel()
+                recorder?.isRecording == true -> Unit
+                else -> pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+            }
+        }
         findViewById<Button>(R.id.vendorUnlock).setOnClickListener {
             if (recorder?.isRecording == true) return@setOnClickListener
             prefs.edit { putBoolean(PREF_VENDOR, !prefs.getBoolean(PREF_VENDOR, false)) }
@@ -187,7 +201,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startPipeline() {
-        if (pipeline != null) return
+        if (pipeline != null || processor != null) return
         val manager = getSystemService(CameraManager::class.java)
         val p = CameraProfile.select(manager, prefs.getString(PREF_PROFILE, null), prefs.getBoolean(PREF_FORCE_4K60, false)) ?: run {
             Toast.makeText(this, R.string.no_camera, Toast.LENGTH_LONG).show()
@@ -235,7 +249,7 @@ class MainActivity : AppCompatActivity() {
             it.zoom = cropZoom
             it.zoomConfig = zoomConfig
         }
-        val rp = RenderPipeline(p, motion, tracker, engine, framing, stabilizerConfig(p, stabPreset, horizonLock), outputWidth, outputHeight, rotationQuarter, object : RenderPipeline.Listener {
+        val rp = RenderPipeline(p, motion, tracker, engine, framing, stabilizerConfig(p.fps, stabPreset, horizonLock), outputWidth, outputHeight, rotationQuarter, object : RenderPipeline.Listener {
             override fun onCameraSurface(surface: Surface) {
                 runOnUiThread { openCamera(p, surface, model, clockOffsetNs) }
             }
@@ -314,6 +328,35 @@ class MainActivity : AppCompatActivity() {
         stopPipeline()
         startPipeline()
         refreshButtons()
+    }
+
+    /**
+     * Processes a gallery video (e.g. 4K60 from the phone's own camera app) like the live
+     * pipeline does and saves the 1080p result; the camera is closed meanwhile.
+     */
+    private fun processVideo(uri: android.net.Uri) {
+        stopPipeline()
+        status.text = getString(R.string.processing, 0, 0.0)
+        val p = VideoProcessor(applicationContext, uri, zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) }, object : VideoProcessor.Listener {
+            override fun onProgress(fraction: Double, processingFps: Double) = runOnUiThread {
+                status.text = getString(R.string.processing, (fraction * 100).roundToInt(), processingFps)
+            }
+
+            override fun onFinished(output: android.net.Uri?, error: String?) = runOnUiThread {
+                processor = null
+                refreshButtons()
+                val msg = when {
+                    output != null -> getString(R.string.processing_done)
+                    error != null -> getString(R.string.processing_failed, error)
+                    else -> getString(R.string.processing_cancelled)
+                }
+                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+                if (hasPermission(Manifest.permission.CAMERA) && !isFinishing) startPipeline()
+            }
+        })
+        processor = p
+        refreshButtons()
+        p.start()
     }
 
     /** Shares what the camera stack offers to this app, to see where 4K60 went. */
@@ -415,9 +458,9 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun stabilizerConfig(p: CameraProfile, preset: StabPreset, horizon: Boolean): StabilizerConfig {
+    private fun stabilizerConfig(fps: Int, preset: StabPreset, horizon: Boolean): StabilizerConfig {
         val base = StabilizerConfig(
-            delayFrames = (preset.lookaheadS * p.fps).roundToInt(),
+            delayFrames = (preset.lookaheadS * fps).roundToInt(),
             smoothness = preset.smoothness,
             rollStabilization = horizon,
         )
@@ -429,7 +472,7 @@ class MainActivity : AppCompatActivity() {
     private fun applyStabilizer(preset: StabPreset, horizon: Boolean): Boolean {
         val p = profile ?: return true
         val rp = pipeline ?: return true
-        val ok = rp.setStabilizer(stabilizerConfig(p, preset, horizon))
+        val ok = rp.setStabilizer(stabilizerConfig(p.fps, preset, horizon))
         if (!ok) Toast.makeText(this, R.string.stab_locked_while_recording, Toast.LENGTH_SHORT).show()
         return ok
     }
@@ -531,6 +574,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.focus).setText(if (settings.focusInfinity) R.string.focus_inf_on else R.string.focus_inf_off)
         findViewById<Button>(R.id.shutter).setText(if (settings.shutterPriority) R.string.shutter_fast_on else R.string.shutter_fast_off)
         findViewById<Button>(R.id.autoZoom).setText(if (zoomConfig.auto) R.string.auto_zoom_on else R.string.auto_zoom_off)
+        findViewById<Button>(R.id.processVideo).setText(if (processor != null) R.string.process_cancel else R.string.process_video)
         val manager = getSystemService(CameraManager::class.java)
         val vendor = findViewById<Button>(R.id.vendorUnlock)
         val hasVendorKeys = runCatching { profile?.let { VendorKeys.isAvailable(manager.getCameraCharacteristics(it.cameraId)) } ?: false }.getOrDefault(false)

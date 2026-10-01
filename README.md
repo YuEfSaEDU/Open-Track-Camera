@@ -42,6 +42,10 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
 - **Otomatik zoom**: kullanıcının belirlediği min/max sınırlar içinde hedefi çıkışta sabit boyutta
   tutar; hedef yalnızca tahminle izlenirken veya kadrajın kenarına kayarken genişler, hedef yokken
   en geniş sınıra döner (yeniden yakalamak için). Ölü bölge ve hız sınırlarıyla "nefes alma" yapmaz.
+- **Galeriden işleme**: telefonun kendi kamerasıyla çekilmiş bir video (ör. üreticinin yalnızca kendi
+  uygulamasına açtığı 4K60) seçilir; takip, ileriye bakan stabilizasyon ve otomatik zoom aynı şekilde
+  uygulanır, 1080p sonuç ve orijinal ses `Movies/OpenTrack` klasörüne yazılır. Kamera hareketi
+  görüntüden kestirilir (kayıtlı videoda jiroskop yok).
 - **Kayıt**: donanım H.264 (isteğe bağlı HEVC) 40 Mbps + AAC ses, `Movies/OpenTrack` klasörüne.
 - **Arayüz**: Geniş görünüm (tüm sensör + kırpma çerçevesi) / Çıkış görünümü (kaydedilen görüntü),
   dokunarak hedef seçme, otomatik kilit.
