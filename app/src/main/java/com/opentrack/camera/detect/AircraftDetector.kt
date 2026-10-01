@@ -50,7 +50,11 @@ class AircraftDetector private constructor(private val detector: ObjectDetector)
     override fun close() {
         if (closed) return
         closed = true
-        detector.close()
+        try {
+            detector.close()
+        } catch (e: Exception) {
+            // MediaPipe rethrows the last graph error on close; the detector is gone either way.
+        }
     }
 
     companion object {

@@ -61,7 +61,7 @@ class DetectorHost(private val context: Context) : AutoCloseable {
             Log.e(TAG, "detection failed ($delegate)", e)
             if (delegate == Delegate.GPU) {
                 // Fall back to the CPU delegate for good.
-                d.close()
+                runCatching { d.close() }
                 detector = null
                 create(listOf(Delegate.CPU))
             }
@@ -74,7 +74,10 @@ class DetectorHost(private val context: Context) : AutoCloseable {
         private set
 
     private fun ensure(): AircraftDetector? {
-        if (detector == null && !gaveUp) create(listOf(Delegate.GPU, Delegate.CPU))
+        // CPU first: the bundled model is the int8 EfficientDet-Lite0, which MediaPipe's GPU
+        // delegate does not support (on a Honor 200 Pro it failed with "ToTensorConverter: input
+        // data size does not match" and gave poor tracking); the bench runs it on CPU too.
+        if (detector == null && !gaveUp) create(listOf(Delegate.CPU, Delegate.GPU))
         return detector
     }
 
@@ -96,7 +99,8 @@ class DetectorHost(private val context: Context) : AutoCloseable {
 
     override fun close() {
         thread.execute {
-            detector?.close()
+            // Closing reports a detection error left pending in the graph: never crash on it.
+            runCatching { detector?.close() }
             detector = null
         }
         thread.shutdown()

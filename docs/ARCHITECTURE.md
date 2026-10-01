@@ -210,6 +210,13 @@ yüksek hız modu 120/240). Çözüm: kendi kamerayla 4K60 çek, sonra uygulamad
   `TargetTracker`, `FramingController`, `YuvRing`, `LookaheadFramer` → enkoder.
 - Her kare işlenir (canlıdaki gibi atlanmaz), tespitler aynı kareye uygulanır (gecikme yok).
 - Video döndürme bilgisi (`rotation`) `FrameRenderer` dönüşüyle uygulanır. Ses izi kopyalanır.
+- Sinir ağı tek bir iş parçacığında (`DetectorHost`), **CPU** delegesiyle çalışır: paketlenen
+  int8 EfficientDet-Lite0 MediaPipe GPU delegesinde desteklenmiyor (Honor 200 Pro'da
+  "ToTensorConverter: input data size does not match" hatası ve zayıf takip). Başarısız bir
+  çalışma takipçiye bildirilmez ("uçak yok" sayılmaz).
+- İşlenen her video için `Download/OpenTrack/…_islenmis.csv` takip kaydı yazılır (tezgâhın CSV
+  biçiminde: durum, hedef, kırpma, zoom, olay, sinir ağı kutuları), telefon sonucu tezgâhla kare kare
+  karşılaştırılabilsin diye.
 - Jiroskop yok: rolling shutter düzeltmesi yapılmaz; telefonun kendi stabilizasyonu kapalı
   çekilmiş videolar en iyi sonucu verir. Gerçek video testlerindeki ölçümler bu durumu temsil eder.
 

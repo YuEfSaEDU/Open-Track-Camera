@@ -183,7 +183,21 @@ class VideoProcessor(
         val encoder = VideoEncoder(outW, outH, fps, if (big) 40_000_000 else 16_000_000, MediaFormat.MIMETYPE_VIDEO_AVC, sink, 0L)
         val encSurface: EGLSurface = egl.createWindowSurface(encoder.inputSurface)
 
+        // Track log next to the video (Download/OpenTrack), in the bench's CSV layout, so a
+        // result from the phone can be compared frame by frame with the desktop bench.
+        val log = StringBuilder("frame,state,tx,ty,tw,th,cx,cy,cw,ch,rot,zoom,event,n_neural,neural_boxes\n")
+        val pending = HashMap<Long, String>()
+        val frameOf = HashMap<Long, Long>()
+
         fun writeOutput(o: LookaheadFramer.Output) {
+            pending.remove(o.timestampNs)?.let { head ->
+                val tr = o.track
+                val tgt = if (tr != null && tr.hasTarget) motion.poseAt(o.timestampNs).toImage(tr.worldAt(o.timestampNs), center) else null
+                val c = o.crop
+                log.append(frameOf.remove(o.timestampNs)).append(',').append(head.substringBefore('|')).append(',')
+                    .append(String.format(Locale.US, "%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.5f,", tgt?.x ?: -1.0, tgt?.y ?: -1.0, tr?.width ?: 0.0, tr?.height ?: 0.0, c.cx, c.cy, c.width, c.height, c.rotation))
+                    .append(head.substringAfter('|')).append('\n')
+            }
             val slot = ring.find(o.timestampNs) ?: return
             egl.makeCurrent(encSurface)
             GLES20.glViewport(0, 0, outW, outH)
@@ -266,6 +280,11 @@ class VideoProcessor(
                     val skyEvery = if (tracker.prediction.state == TrackState.TRACKING) 12 else 3
                     if (frame % skyEvery == 0L) dets += sky.detect(lf)
                     val p = tracker.process(lf, dets, runs)
+                    val neural = dets.filter { it.source == com.opentrack.tracking.DetectionSource.NEURAL }
+                    pending[ts] = "${p.state}|" + String.format(Locale.US, "%.3f,%s,%d,", framing.zoom, tracker.lastEvent, neural.size) +
+                        neural.joinToString(" ") { String.format(Locale.US, "%.0f:%.0f:%.0f:%.0f:%.2f", it.box.left, it.box.top, it.box.right, it.box.bottom, it.score) } +
+                        (if (runs.isNotEmpty()) " roi=" + (runs[0].region?.let { r -> String.format(Locale.US, "%.0f:%.0f:%.0f", r.cx, r.cy, r.width) } ?: "full") else "")
+                    frameOf[ts] = frame
                     lastTargetBox = if (p.hasTarget) {
                         val c = motion.poseAt(ts).toImage(p.worldAt(ts), center)
                         Box(c.x, c.y, maxOf(p.width, 24 * scale), maxOf(p.height, 24 * scale))
@@ -303,6 +322,7 @@ class VideoProcessor(
             ok = ok && written
             if (ok) {
                 resolver.update(outUri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+                runCatching { writeLog(name.removeSuffix(".mp4") + ".csv", log.toString()) }.onFailure { Log.w(TAG, "track log not written", it) }
             } else {
                 resolver.delete(outUri, null, null)
             }
@@ -320,6 +340,20 @@ class VideoProcessor(
             extractor.release()
         }
         return if (ok) outUri else null
+    }
+
+    /** Saves the track log to Download/OpenTrack (MediaStore, no permission needed). */
+    private fun writeLog(name: String, text: String) {
+        val resolver = context.contentResolver
+        val uri = resolver.insert(
+            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+            ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, "text/csv")
+                put(MediaStore.Downloads.RELATIVE_PATH, "Download/OpenTrack")
+            },
+        ) ?: return
+        resolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
     }
 
     /** Copies the source's audio samples into [sink] (same clock as the video timestamps). */
