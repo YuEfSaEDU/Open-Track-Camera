@@ -37,8 +37,24 @@ def md(text):
     return {"cell_type": "markdown", "metadata": {}, "source": text.strip("\n").splitlines(keepends=True)}
 
 
-def code(text):
-    return {"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": text.strip("\n").splitlines(keepends=True)}
+PRELUDE = """
+import os, glob
+for _k, _v in dict(PRESET="small", EPOCHS=25, BATCH=32, MODEL="mobilenet_multi_avg_384", USE_DRIVE=True).items():
+    globals().setdefault(_k, _v)
+PY = "/content/mm/bin/python"
+DATA = "/content/dataset"
+OUT = "/content/drive/MyDrive/OpenTrackDetector" if USE_DRIVE and os.path.isdir("/content/drive/MyDrive") else "/content/model"
+_site = "/content/mm/lib/python3.11/site-packages/nvidia"
+os.environ["LD_LIBRARY_PATH"] = ":".join(glob.glob(_site + "/*/lib")) + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+os.environ["PATH"] = ":".join(glob.glob(_site + "/cuda_nvcc/bin")) + ":" + os.environ["PATH"]
+os.environ["MPLBACKEND"] = "Agg"  # Colab's notebook plotting backend does not exist in the Python 3.11 environment
+"""
+
+
+def code(text, prelude=False):
+    """A code cell; with [prelude], it runs on its own too (after a runtime restart, or alone)."""
+    src = (PRELUDE.strip("\n") + "\n\n" if prelude else "") + text.strip("\n")
+    return {"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": src.splitlines(keepends=True)}
 
 
 def script_cell(name):
@@ -94,34 +110,26 @@ os.makedirs(OUT, exist_ok=True)
 print("sonuç klasörü:", OUT)
 """),
         md("## 1. Ortam (Python 3.11 + TensorFlow 2.15 + Model Maker)"),
-        code("""
+        code(prelude=True, text="""
 REQ = """ + json.dumps(REQUIREMENTS) + """
 REQ_ARGS = " ".join('"' + r + '"' for r in REQ)
 if not os.path.exists("/content/mm/bin/python"):
     !pip -q install uv
     !uv venv -q /content/mm --python 3.11
     !uv pip install -q --python /content/mm/bin/python {REQ_ARGS}
-# TensorFlow 2.15'in GPU kütüphaneleri pip paketlerinden gelir: yollarını göster.
-site = "/content/mm/lib/python3.11/site-packages/nvidia"
-os.environ["LD_LIBRARY_PATH"] = ":".join(glob.glob(site + "/*/lib")) + ":" + os.environ.get("LD_LIBRARY_PATH", "")
-os.environ["PATH"] = ":".join(glob.glob(site + "/cuda_nvcc/bin")) + ":" + os.environ["PATH"]
-# Colab's notebook plotting backend does not exist in the Python 3.11 environment.
-os.environ["MPLBACKEND"] = "Agg"
-PY = "/content/mm/bin/python"
 !{PY} -c "import tensorflow as tf; g = tf.config.list_physical_devices('GPU'); print('TensorFlow', tf.__version__, 'GPU:', g); assert g, 'TensorFlow GPU görmüyor'"
 """),
         md("## 2. Betikler"),
         script_cell("prepare_dataset.py"),
         script_cell("train.py"),
         md("## 3. Veri seti"),
-        code("""
-DATA = "/content/dataset"
+        code(prelude=True, text="""
 if not os.path.exists(f"{DATA}/stats.json"):
     !{PY} /content/prepare_dataset.py --out {DATA} --cache /content/downloads --preset {PRESET}
 !cat {DATA}/stats.json
 """),
         md("## 4. Eğitim"),
-        code("""
+        code(prelude=True, text="""
 if os.path.exists(f"{OUT}/aircraft_fp16.tflite") and os.path.exists(f"{OUT}/results.json"):
     print("Eğitim zaten bitmiş (yeniden eğitmek için", OUT, "klasörünü sil).")
 else:
@@ -129,7 +137,7 @@ else:
     !{PY} /content/train.py --data {DATA} --out {OUT} --cache /content/tfcache --model {MODEL} --epochs {EPOCHS} --batch {BATCH} {resume}
 """),
         md("## 5. Sonuç"),
-        code("""
+        code(prelude=True, text="""
 !cat {OUT}/results.json
 !ls -la {OUT}/*.tflite
 from google.colab import files
