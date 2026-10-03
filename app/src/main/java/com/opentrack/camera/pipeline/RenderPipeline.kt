@@ -58,7 +58,14 @@ class RenderPipeline(
         /** The surface the camera must stream into. Called on the render thread. */
         fun onCameraSurface(surface: Surface)
         fun onOverlay(state: OverlayState)
+        /** Every frame has been failing to render (e.g. a 10-bit surface the phone cannot draw); once. */
+        fun onRenderError(message: String) {}
     }
+
+    /** The last render error, for the camera report. */
+    @Volatile var lastError: String? = null
+        private set
+    private var failedFrames = 0
 
     @Volatile var previewMode = PreviewMode.WIDE
 
@@ -224,8 +231,11 @@ class RenderPipeline(
         if (released) return
         try {
             drawFrame(st)
+            failedFrames = 0
         } catch (e: Exception) {
             Log.e(TAG, "frame failed", e)
+            lastError = e.toString().take(300)
+            if (++failedFrames == FAILED_FRAMES_REPORT) listener.onRenderError(lastError ?: "?")
         }
     }
 
@@ -465,6 +475,9 @@ class RenderPipeline(
 
         /** Capture window size relative to the crop: room for the look-ahead path to deviate. */
         const val CAPTURE_MARGIN = 1.25
+
+        /** Consecutive failed frames (~0.5 s at 60 fps) before the failure is reported. */
+        const val FAILED_FRAMES_REPORT = 30
 
         /** Per output frame: how fast the perspective correction returns after backing off. */
         const val VIEW_STRENGTH_RISE = 0.02

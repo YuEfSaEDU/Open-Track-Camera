@@ -80,4 +80,8 @@
     <string name="model_own">Model: aircraft (new)</string>
     <string name="model_coco">Model: COCO (old)</string>
     <string name="model_coco_vehicles">Model: COCO (vehicles)</string>
+    <string name="no_frames">The camera delivers no picture.</string>
+    <string name="recover_vendor">No picture with the maker\'s keys (vendor experiment): turned it off. %s</string>
+    <string name="recover_forced">No picture in the forced 4K60 mode: back to the listed modes. %s</string>
+    <string name="recover_ten_bit">10-bit picture does not work on this phone: switched to HEVC (8-bit). %s</string>
 </resources>

@@ -77,4 +77,8 @@
     <string name="model_own">Model: hava aracı (yeni)</string>
     <string name="model_coco">Model: COCO (eski)</string>
     <string name="model_coco_vehicles">Model: COCO (araçlar)</string>
+    <string name="no_frames">Kamera görüntü vermiyor.</string>
+    <string name="recover_vendor">Üretici anahtarlarıyla (üretici deneyi) görüntü gelmedi: kapatıldı. %s</string>
+    <string name="recover_forced">Zorlanmış 4K60 modunda görüntü gelmedi: listelenen modlara dönüldü. %s</string>
+    <string name="recover_ten_bit">10-bit görüntü bu telefonda çalışmadı: HEVC (8-bit) seçildi. %s</string>
 </resources>

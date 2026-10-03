@@ -68,6 +68,9 @@ class MainActivity : AppCompatActivity() {
     private var lens: CameraProfile.Lens? = null
     /** The camera delivered at least one frame since it was opened (a failing lens never does). */
     @Volatile private var framesSeen = false
+    /** Last camera / render errors, for the camera report. */
+    private var lastCameraError: String? = null
+    private var lastRenderError: String? = null
     /** Frame-by-frame log of the current recording (see [Telemetry]), when enabled. */
     private var telemetry: Telemetry? = null
     private var lastLoggedSettings: String? = null
@@ -364,6 +367,23 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { openCamera(p, surface, model, clockOffsetNs) }
             }
 
+            override fun onRenderError(message: String) {
+                runOnUiThread {
+                    lastRenderError = message
+                    if (codec.tenBit && pipeline != null) {
+                        // The 10-bit surfaces do not work on this phone: back to 8-bit HEVC.
+                        codec = VideoCodec.HEVC
+                        prefs.edit { putString(PREF_CODEC, codec.name) }
+                        Toast.makeText(this@MainActivity, getString(R.string.recover_ten_bit, message), Toast.LENGTH_LONG).show()
+                        stopPipeline()
+                        startPipeline()
+                        refreshButtons()
+                    } else {
+                        Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+
             override fun onOverlay(state: OverlayState) {
                 overlay.state = state
                 val now = SystemClock.uptimeMillis()
@@ -395,22 +415,54 @@ class MainActivity : AppCompatActivity() {
 
             override fun onError(message: String) {
                 runOnUiThread {
-                    if (lens != null && !framesSeen && camera === cam) {
-                        // A lens the maker keeps for its own app: back to the main lens.
-                        Toast.makeText(this@MainActivity, getString(R.string.lens_failed, message), Toast.LENGTH_LONG).show()
-                        prefs.edit { remove(PREF_LENS) }
-                        stopPipeline()
-                        startPipeline()
-                        refreshButtons()
-                    } else {
-                        Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
-                    }
+                    lastCameraError = "${p.label} kamera ${p.lensKey}: $message"
+                    if (!framesSeen && camera === cam) recoverFromNoFrames(message)
+                    else Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
                 }
             }
         }
         cam.update(settings)
         camera = cam
         cam.open(surface)
+        // A camera that opens but never delivers a frame (a forced mode the sensor refuses, the
+        // vendor keys, a hidden lens) reports no error: check after a while.
+        overlay.postDelayed({
+            if (camera === cam && !framesSeen) {
+                lastCameraError = "${p.label} kamera ${p.lensKey}: ${FRAME_TIMEOUT_MS / 1000} s içinde kare gelmedi"
+                recoverFromNoFrames(getString(R.string.no_frames))
+            }
+        }, FRAME_TIMEOUT_MS)
+    }
+
+    /**
+     * The camera gives no frames: undo, one per attempt, the experimental choices that can cause
+     * it (vendor keys, a hidden lens, a forced 4K60), then restart. Each step changes a setting,
+     * so this cannot loop; with nothing left to undo it only says so.
+     */
+    private fun recoverFromNoFrames(message: String) {
+        val p = profile
+        val step = when {
+            prefs.getBoolean(PREF_VENDOR, false) -> {
+                prefs.edit { putBoolean(PREF_VENDOR, false) }
+                R.string.recover_vendor
+            }
+            lens != null -> {
+                prefs.edit { remove(PREF_LENS) }
+                R.string.lens_failed
+            }
+            p?.forced == true -> {
+                prefs.edit { putBoolean(PREF_FORCE_4K60, false); remove(PREF_PROFILE) }
+                R.string.recover_forced
+            }
+            else -> {
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                return
+            }
+        }
+        Toast.makeText(this, getString(step, message), Toast.LENGTH_LONG).show()
+        stopPipeline()
+        startPipeline()
+        refreshButtons()
     }
 
     /**
@@ -558,7 +610,9 @@ class MainActivity : AppCompatActivity() {
     /** Shares what the camera stack offers to this app, to see where 4K60 went. */
     private fun shareCameraReport() {
         val text = runCatching {
-            (lastCrash?.let { "$it\n\n" } ?: "") + (detector?.report()?.let { "$it\n" } ?: "") + (lastProcessingError?.let { "İşleme hatası: $it\n" } ?: "") + "Üretici deneyi: ${if (prefs.getBoolean(PREF_VENDOR, false)) "açık (" + VendorKeys.lastLog + ")" else "kapalı"}, " +
+            (lastCrash?.let { "$it\n\n" } ?: "") + (detector?.report()?.let { "$it\n" } ?: "") + (lastProcessingError?.let { "İşleme hatası: $it\n" } ?: "") +
+                (lastCameraError?.let { "Son kamera hatası: $it\n" } ?: "") + ((lastRenderError ?: pipeline?.lastError)?.let { "Görüntü hatası: $it\n" } ?: "") +
+                "Codec: ${codec.name}, 10-bit GPU: ${if (pipeline?.tenBitActive == true) "evet" else "hayır"}, lens: ${lens?.key ?: "ana"}, kare geldi: ${if (framesSeen) "evet" else "hayır"}\n" + "Üretici deneyi: ${if (prefs.getBoolean(PREF_VENDOR, false)) "açık (" + VendorKeys.lastLog + ")" else "kapalı"}, " +
                 "ölçülen fps: ${"%.1f".format(lastMeasuredFps)}\n" + CameraReport.build(getSystemService(CameraManager::class.java), profile)
         }.getOrElse { it.stackTraceToString() }
         val send = Intent(Intent.ACTION_SEND).setType("text/plain")
@@ -870,6 +924,8 @@ class MainActivity : AppCompatActivity() {
         const val PREF_PROFILE = "profile"
         const val PREF_FORCE_4K60 = "force4k60"
         const val PREF_VENDOR = "vendorUnlock"
+        /** How long an opened camera may go without a frame before [recoverFromNoFrames]. */
+        const val FRAME_TIMEOUT_MS = 4000L
         const val PREF_SHUTTER = "shutterNs"
         const val PREF_DETECTOR = "detectorMode"
         const val PREF_TARGET = "targetClasses"
