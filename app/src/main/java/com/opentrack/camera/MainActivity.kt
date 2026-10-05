@@ -158,7 +158,8 @@ class MainActivity : AppCompatActivity() {
         overlay = findViewById(R.id.overlay)
         status = findViewById(R.id.status)
         recordButton = findViewById(R.id.record)
-        overlay.onTap = { p -> analysis?.selectAt(p) }
+        // The wide view shows the camera frame: a tap there is mapped to the reference space.
+        overlay.onTap = { p -> analysis?.selectAt(if (previewMode == PreviewMode.WIDE) pipeline?.frameMap?.toRef(p) ?: p else p) }
 
         findViewById<android.view.SurfaceView>(R.id.preview).holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
@@ -331,12 +332,12 @@ class MainActivity : AppCompatActivity() {
         val srcH = p.sourceSize.height
         // 4K-class sources (the telephoto's 3648 px too): 1080p or 1440p as chosen; else 720p.
         if (srcW >= 2560) { outputWidth = outputLongSide; outputHeight = outputLongSide * 9 / 16 } else { outputWidth = 1280; outputHeight = 720 }
-        cropZoom = FramingController.nativeZoom(srcW, outputWidth)
+        // Crop zooms are relative to the main lens: the stream's own pixels at the slider's zoom.
+        cropZoom = FramingController.nativeZoom(srcW, outputWidth) * settings.zoomRatio
 
         val rotationQuarter = display?.rotation ?: Surface.ROTATION_90
         val model = GyroMotionModel().apply {
-            // The reference space (see RenderPipeline.zoomAt): the user's camera zoom ratio, whatever
-            // lens or ratio hybrid zoom switches to.
+            // The reference space (see RenderPipeline.zoomAt, refZoom): set by applyReference.
             focalPx = p.focalPx * settings.zoomRatio
             axisMap = GyroMotionModel.forDisplayRotation(rotationQuarter * 90)
         }
@@ -372,7 +373,7 @@ class MainActivity : AppCompatActivity() {
         analysis = engine
 
         val framing = FramingController(srcW, srcH, outputWidth.toDouble() / outputHeight, motion).also {
-            it.zoom = cropZoom
+            it.zoom = maxOf(1.0, cropZoom / settings.zoomRatio)
             it.zoomConfig = zoomConfig
         }
         var rpRef: RenderPipeline? = null
@@ -401,7 +402,7 @@ class MainActivity : AppCompatActivity() {
             override fun onZoomRequest(ratio: Double) {
                 runOnUiThread {
                     if (pipeline !== rpRef) return@runOnUiThread
-                    hybridTarget = ratio.toFloat().takeIf { kotlin.math.abs(it - settings.zoomRatio) > 1e-3 }
+                    hybridTarget = ratio.toFloat()
                     camera?.update(cameraSettings())
                 }
             }
@@ -419,7 +420,6 @@ class MainActivity : AppCompatActivity() {
         rp.focalPx = p.focalPx * settings.zoomRatio
         rp.baseZoom = settings.zoomRatio.toDouble()
         rp.zoomRequested(settings.zoomRatio.toDouble())
-        hybridTarget = null
         rp.zoomAt = { ts -> camera?.zoomAt(ts) }
         rpRef = rp
         pipeline = rp
@@ -609,7 +609,7 @@ class MainActivity : AppCompatActivity() {
         stopPipeline()
         status.text = getString(R.string.processing, 0, 0.0)
         val p = VideoProcessor(
-            applicationContext, uri, sharedDetector(), zoomConfig, { fps -> stabilizerConfig(fps, stabPreset, horizonLock) },
+            applicationContext, uri, sharedDetector(), zoomConfig.copy(minZoom = maxOf(1.0, zoomConfig.minZoom), maxZoom = maxOf(1.0, zoomConfig.maxZoom)), { fps -> stabilizerConfig(fps, stabPreset, horizonLock) },
             targetClasses.labels, detectorModel, detectorMode != AnalysisEngine.Mode.NEURAL_ONLY, outputLongSide, codec,
             object : VideoProcessor.Listener {
             override fun onProgress(fraction: Double, processingFps: Double) = runOnUiThread {
@@ -665,108 +665,147 @@ class MainActivity : AppCompatActivity() {
     private fun updateSettings(s: CameraSettings) {
         val zoomChanged = s.zoomRatio != settings.zoomRatio
         settings = s
-        if (zoomChanged) {
-            // A new reference space: the user's camera zoom. Hybrid zoom starts over from it.
-            hybridTarget = null
-            profile?.let { p ->
-                gyroModel?.focalPx = p.focalPx * s.zoomRatio
-                pipeline?.focalPx = p.focalPx * s.zoomRatio
-            }
-            pipeline?.baseZoom = s.zoomRatio.toDouble()
-            pipeline?.zoomRequested(s.zoomRatio.toDouble())
-            applyHybrid(announce = false)
-        }
+        // Without hybrid zoom the camera zoom slider sets the reference space.
+        if (zoomChanged && pipeline?.hybrid == null) applyReference()
         camera?.update(cameraSettings())
         refreshButtons()
     }
 
     /** What the camera gets: the user's settings, at the zoom ratio hybrid zoom chose. */
-    private fun cameraSettings(): CameraSettings = hybridTarget?.let { settings.copy(zoomRatio = it) } ?: settings
+    private fun cameraSettings(): CameraSettings = settings.copy(zoomRatio = cameraZoom())
+
+    /** The camera zoom ratio: hybrid zoom's choice, else the camera zoom slider. */
+    private fun cameraZoom(): Float = ladder()?.takeIf { pipeline?.hybrid != null }?.let { hybridTarget ?: it.first() } ?: settings.zoomRatio
 
     /**
-     * The telephoto's zoom ratio on the current multi-camera (the ratio at which its HAL
-     * switches to it, rounded up a little), or null without one.
+     * The camera zoom ratio of the reference space: tracking, framing and stabilization work in
+     * that frame (see RenderPipeline.zoomAt): with hybrid zoom its widest lens, else the camera
+     * zoom slider. Crop zooms shown and set are relative to the main lens (x this).
      */
-    private fun teleRatio(): Float? {
+    private fun refZoom(): Double = (ladder()?.takeIf { pipeline?.hybrid != null }?.first() ?: settings.zoomRatio).toDouble()
+
+    /** Lens kinds of a multi-camera's physical lenses, by camera id: angle of view vs the main lens. */
+    private var lensFactors: Map<String, Double> = emptyMap()
+
+    /**
+     * The camera zoom ratios hybrid zoom moves between on the current multi-camera: its wide
+     * angle (the widest ratio), the main lens (1x) and its telephoto (the ratio its HAL
+     * switches to it, rounded up a little); null without at least two of them.
+     */
+    private fun ladder(): List<Float>? {
         val l = lens?.takeIf { it.multi } ?: return null
-        teleCache?.let { (key, r) -> if (key == l.key) return r }
-        return computeTeleRatio(l).also { teleCache = l.key to it }
+        ladderCache?.let { (key, r) -> if (key == l.key) return r }
+        return computeLadder(l).also { ladderCache = l.key to it }
     }
 
-    /** [teleRatio] per multi-camera (listing the lenses opens every camera's characteristics). */
-    private var teleCache: Pair<String, Float?>? = null
+    /** [ladder] per multi-camera (listing the lenses opens every camera's characteristics). */
+    private var ladderCache: Pair<String, List<Float>?>? = null
 
-    private fun computeTeleRatio(l: CameraProfile.Lens): Float? {
+    private fun computeLadder(l: CameraProfile.Lens): List<Float>? {
         val range = l.zoomRange ?: return null
-        val tele = CameraProfile.lenses(getSystemService(CameraManager::class.java))
+        val physical = CameraProfile.lenses(getSystemService(CameraManager::class.java))
             .filter { !it.multi && (it.cameraId in l.physicalIds || it.physicalId in l.physicalIds) }
-            .maxOfOrNull { it.zoomFactor } ?: return null
-        if (tele < 1.3) return null
-        return (kotlin.math.ceil(tele * 10 - 1e-6) / 10).toFloat().coerceIn(range.lower, range.upper)
+        lensFactors = physical.associate { (it.physicalId ?: it.cameraId) to it.zoomFactor }
+        val out = ArrayList<Float>()
+        if (physical.any { it.zoomFactor < 0.85 } && range.lower < 0.95f) out += range.lower
+        out += 1f.coerceIn(range.lower, range.upper)
+        physical.maxOfOrNull { it.zoomFactor }?.takeIf { it >= 1.3 }?.let { tele ->
+            out += (kotlin.math.ceil(tele * 10 - 1e-6) / 10).toFloat().coerceIn(range.lower, range.upper)
+        }
+        return out.distinct().takeIf { it.size >= 2 }
     }
 
-    /** The crop zoom from which the telephoto is used (see [HybridZoom]), or null. */
-    private fun hybridFromZoom(): Double? = pipeline?.hybrid?.let { it.teleRatio * HybridZoom.ENTER_ROOM }
+    /** The crop zoom (vs the main lens) from which the telephoto is used, or null. */
+    private fun hybridFromZoom(): Double? = ladder()?.takeIf { pipeline?.hybrid != null && it.last() > 1.3f }?.let { it.last() * HybridZoom.ENTER_ROOM }
 
     /** Creates (or removes) hybrid zoom for the current camera and settings. */
     private fun applyHybrid(announce: Boolean) {
         val rp = pipeline
         val p = profile
-        val tele = teleRatio()
-        val rel = tele?.let { it / settings.zoomRatio.toDouble() }
-        val hz = if (hybridOn && rp != null && p != null && rel != null && rel >= 1.2) HybridZoom(rel, p.sourceSize.width, p.sourceSize.height) else null
+        val steps = ladder()
+        val wasOn = rp?.hybrid != null
+        val hz = if (hybridOn && rp != null && p != null && steps != null && analysis?.supportsWindows == true) {
+            HybridZoom(steps.map { it.toDouble() / steps.first() }, p.sourceSize.width, p.sourceSize.height)
+        } else null
         rp?.hybrid = hz
-        if (hz == null && hybridTarget != null) {
-            hybridTarget = null
-            rp?.zoomRequested(settings.zoomRatio.toDouble())
-            camera?.update(cameraSettings())
+        hybridTarget = null
+        applyReference()
+        if (hz != null && !wasOn && steps != null) {
+            // The auto zoom must reach from the wide angle to the telephoto.
+            val far = steps.last() * HybridZoom.ENTER_ROOM
+            updateZoomConfig(zoomConfig.copy(minZoom = steps.first().toDouble(), maxZoom = minOf(ZOOM_MAX, maxOf(zoomConfig.maxZoom, kotlin.math.ceil(far + 2.0)))))
+        } else if (zoomConfig.minZoom < refZoom()) {
+            // Narrower reference (hybrid zoom off): limits below its whole frame mean that frame.
+            updateZoomConfig(zoomConfig.copy(minZoom = refZoom(), maxZoom = maxOf(refZoom(), zoomConfig.maxZoom)))
         }
+        camera?.update(cameraSettings())
+        p?.let { setupSliders(it) }
         if (announce) {
             val msg = when {
                 !hybridOn -> getString(R.string.hybrid_off_hint)
-                hz == null -> getString(R.string.hybrid_unavailable)
-                else -> {
-                    // The auto zoom must be allowed far enough in to ever reach the telephoto.
-                    val from = hz.teleRatio * HybridZoom.ENTER_ROOM
-                    if (zoomConfig.maxZoom < from + 1.0) updateZoomConfig(zoomConfig.copy(maxZoom = minOf(ZOOM_SLIDER_MAX, kotlin.math.ceil(from + 2.0))))
-                    setupSliders(p!!)
-                    getString(R.string.hybrid_on_hint, from)
-                }
+                hz == null || steps == null -> getString(R.string.hybrid_unavailable)
+                else -> getString(R.string.hybrid_on_hint, steps.joinToString(" / ") { "%.1fx".format(java.util.Locale.ROOT, it) }, hybridFromZoom() ?: 0.0)
             }
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
         }
         refreshButtons()
     }
 
+    /** The reference space changed (camera zoom slider, hybrid zoom on/off): focal length and crop zoom follow. */
+    private fun applyReference() {
+        val ref = refZoom()
+        profile?.let { p ->
+            gyroModel?.focalPx = p.focalPx * ref
+            pipeline?.focalPx = p.focalPx * ref
+        }
+        pipeline?.baseZoom = ref
+        pipeline?.zoomRequested(cameraZoom().toDouble())
+        applyFraming()
+    }
+
+    /** Crop zoom settings (vs the main lens) → the framing, which works in the reference space. */
+    private fun applyFraming() {
+        val f = pipeline?.framing ?: return
+        val ref = refZoom()
+        f.zoomConfig = zoomConfig.copy(minZoom = maxOf(1.0, zoomConfig.minZoom / ref), maxZoom = maxOf(1.0, zoomConfig.maxZoom / ref))
+        if (!zoomConfig.auto) f.zoom = maxOf(1.0, cropZoom / ref)
+    }
+
     private fun setupSliders(p: CameraProfile) {
+        // Crop zooms are relative to the main lens (like the phone's own camera): from the
+        // reference space's whole frame (0.4x with the wide angle) to ZOOM_MAX, in 0.05 steps.
+        val low = refZoom()
+        val steps = ((ZOOM_MAX - low) / 0.05).roundToInt()
+        fun progressOf(z: Double) = ((z - low) / 0.05).roundToInt().coerceIn(0, steps)
+        fun zoomOf(v: Int) = low + v * 0.05
         val crop = findViewById<SeekBar>(R.id.cropZoom)
         val cropLabel = findViewById<TextView>(R.id.cropZoomLabel)
-        // Crop zoom 1.0x … 8.0x in 0.05 steps.
-        crop.max = ZOOM_STEPS
-        crop.progress = ((cropZoom - 1.0) / 0.05).roundToInt()
+        crop.max = steps
+        cropZoom = cropZoom.coerceIn(low, ZOOM_MAX)
+        crop.progress = progressOf(cropZoom)
         cropLabel.text = getString(R.string.crop_zoom, cropZoom)
         crop.isEnabled = !zoomConfig.auto
         crop.setOnSeekBarChangeListener(onChange { v ->
-            cropZoom = 1.0 + v * 0.05
-            pipeline?.framing?.zoom = cropZoom
+            cropZoom = zoomOf(v)
+            applyFraming()
             cropLabel.text = getString(R.string.crop_zoom, cropZoom)
         })
 
-        // Auto zoom limits, same 1.0x … 4.0x scale as the crop zoom.
+        // Auto zoom limits, same scale as the crop zoom.
         val autoMinBar = findViewById<SeekBar>(R.id.zoomMin)
         val autoMaxBar = findViewById<SeekBar>(R.id.zoomMax)
         val autoMinLabel = findViewById<TextView>(R.id.zoomMinLabel)
         val autoMaxLabel = findViewById<TextView>(R.id.zoomMaxLabel)
-        // With the telephoto (hybrid zoom), crops it takes are not enlarged up to its own limit.
-        val native = FramingController.nativeZoom(p.sourceSize.width, outputWidth) * (pipeline?.hybrid?.teleRatio ?: 1.0)
+        // Up to here the longest camera zoom (the telephoto with hybrid zoom) has pixels for the output.
+        val native = FramingController.nativeZoom(p.sourceSize.width, outputWidth) * cameraZoomMax()
         fun label(v: Double) = getString(if (v > native + 1e-6) R.string.zoom_limit_upscaled else R.string.zoom_limit, v)
-        for (bar in listOf(autoMinBar, autoMaxBar)) bar.max = ZOOM_STEPS
-        autoMinBar.progress = ((zoomConfig.minZoom - 1.0) / 0.05).roundToInt()
-        autoMaxBar.progress = ((zoomConfig.maxZoom - 1.0) / 0.05).roundToInt()
+        for (bar in listOf(autoMinBar, autoMaxBar)) bar.max = steps
+        autoMinBar.progress = progressOf(zoomConfig.minZoom)
+        autoMaxBar.progress = progressOf(zoomConfig.maxZoom)
         autoMinLabel.text = getString(R.string.zoom_min, label(zoomConfig.minZoom))
         autoMaxLabel.text = getString(R.string.zoom_max, label(zoomConfig.maxZoom))
         autoMinBar.setOnSeekBarChangeListener(onChange { v ->
-            val z = 1.0 + v * 0.05
+            val z = zoomOf(v)
             // Keep min <= max by pushing the other limit.
             if (z > zoomConfig.maxZoom) autoMaxBar.progress = v
             updateZoomConfig(zoomConfig.copy(minZoom = z, maxZoom = maxOf(z, zoomConfig.maxZoom)))
@@ -774,7 +813,7 @@ class MainActivity : AppCompatActivity() {
             autoMaxLabel.text = getString(R.string.zoom_max, label(zoomConfig.maxZoom))
         })
         autoMaxBar.setOnSeekBarChangeListener(onChange { v ->
-            val z = 1.0 + v * 0.05
+            val z = zoomOf(v)
             if (z < zoomConfig.minZoom) autoMinBar.progress = v
             updateZoomConfig(zoomConfig.copy(maxZoom = z, minZoom = minOf(z, zoomConfig.minZoom)))
             autoMaxLabel.text = getString(R.string.zoom_max, label(z))
@@ -788,6 +827,10 @@ class MainActivity : AppCompatActivity() {
         lens.max = ((zMax - zMin) * 10).roundToInt().coerceAtLeast(0)
         lens.progress = ((settings.zoomRatio - zMin) * 10).roundToInt()
         lensLabel.text = getString(R.string.lens_zoom, settings.zoomRatio)
+        // With hybrid zoom the camera zoom is chosen automatically (the lens per crop).
+        val hybridActive = pipeline?.hybrid != null
+        lens.isEnabled = !hybridActive
+        if (hybridActive) lensLabel.text = getString(R.string.lens_zoom_hybrid)
         lens.setOnSeekBarChangeListener(onChange { v ->
             val ratio = zMin + v / 10f
             lensLabel.text = getString(R.string.lens_zoom, ratio)
@@ -828,18 +871,18 @@ class MainActivity : AppCompatActivity() {
     private fun updateZoomConfig(c: ZoomConfig) {
         val wasAuto = zoomConfig.auto
         zoomConfig = c
-        pipeline?.framing?.let { f ->
-            // Leaving auto mode keeps the current zoom as the new manual value.
-            if (wasAuto && !c.auto) cropZoom = f.zoom
-            f.zoomConfig = c
-            if (!c.auto) f.zoom = cropZoom
-        }
+        // Leaving auto mode keeps the current zoom as the new manual value.
+        pipeline?.framing?.let { f -> if (wasAuto && !c.auto) cropZoom = f.zoom * refZoom() }
+        applyFraming()
         val crop = findViewById<SeekBar>(R.id.cropZoom)
         crop.isEnabled = !c.auto
-        crop.progress = ((cropZoom - 1.0) / 0.05).roundToInt()
+        crop.progress = ((cropZoom - refZoom()) / 0.05).roundToInt()
         findViewById<TextView>(R.id.cropZoomLabel).text = getString(R.string.crop_zoom, cropZoom)
         refreshButtons()
     }
+
+    /** The longest camera zoom ratio in use: the telephoto's with hybrid zoom, else the slider's. */
+    private fun cameraZoomMax(): Double = (ladder()?.takeIf { pipeline?.hybrid != null }?.last() ?: settings.zoomRatio).toDouble()
 
     private fun onChange(block: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
         override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
@@ -930,7 +973,8 @@ class MainActivity : AppCompatActivity() {
     private fun logSettings() {
         val t = telemetry ?: return
         val line = t.line("set").i("shutterNs", settings.shutterNs).n("ev", settings.evThirds / 3.0, 2).b("focusInf", settings.focusInfinity)
-            .n("cameraZoom", settings.zoomRatio.toDouble(), 2).b("ois", settings.ois).s("stab", stabPreset.name).b("horizon", horizonLock)
+            .n("cameraZoom", settings.zoomRatio.toDouble(), 2).b("hybrid", pipeline?.hybrid != null)
+            .s("ladder", ladder()?.joinToString(",")).n("refZoom", refZoom(), 2).b("ois", settings.ois).s("stab", stabPreset.name).b("horizon", horizonLock)
             .b("autoZoom", zoomConfig.auto).n("zoomMin", zoomConfig.minZoom, 2).n("zoomMax", zoomConfig.maxZoom, 2).n("cropZoom", cropZoom, 2)
             .s("detector", detectorMode.name).s("target", targetClasses.name).s("model", detectorModel.name).b("autoLock", autoLock).s("view", previewMode.name).s("codec", codec.name).i("outLong", outputLongSide)
         // Only when something changed (the line without its timestamp is the comparison key).
@@ -942,6 +986,28 @@ class MainActivity : AppCompatActivity() {
 
     /** Frame rate the pipeline actually gets, for the camera report. */
     private var lastMeasuredFps = 0.0
+
+    /**
+     * The lens the picture comes from right now and the camera zoom ratio, e.g. "TELE 2.6x".
+     * On a multi-camera hybrid zoom switches them: the lens is the one the camera reports
+     * (else guessed from the ratio).
+     */
+    private fun lensNow(): String {
+        val zoom = (pipeline?.frameMap?.zoom ?: 1.0) * refZoom()
+        val factor = if (lens?.multi == true) {
+            camera?.activePhysicalId?.let { lensFactors[it] }
+                ?: if (zoom < 0.95) 0.6 else if (zoom >= (ladder()?.last() ?: 99f) - 0.05) 2.0 else 1.0
+        } else lens?.zoomFactor ?: 1.0
+        val kind = getString(
+            when {
+                factor < 0.85 -> R.string.lens_wide
+                factor > 1.3 -> R.string.lens_tele
+                else -> R.string.lens_main
+            },
+        ).uppercase(java.util.Locale.getDefault())
+        val id = if (lens?.multi == true) camera?.activePhysicalId?.let { " ($it)" } ?: "" else ""
+        return "$kind ${"%.1f".format(java.util.Locale.ROOT, zoom)}x$id"
+    }
 
     private fun showStatus(s: OverlayState) {
         lastMeasuredFps = s.fps
@@ -955,14 +1021,11 @@ class MainActivity : AppCompatActivity() {
             },
         )
         val exposure = camera?.takeIf { it.lastExposureNs > 0 }?.let { "1/${(1e9 / it.lastExposureNs).roundToInt()} s ISO ${it.lastIso}" } ?: "-"
-        // The lens a multi-camera is on, and its zoom ratio (hybrid zoom switches them).
-        val lensNow = if (lens?.multi == true) camera?.activePhysicalId?.let { id ->
-            " · kam $id ${"%.1f".format(java.util.Locale.ROOT, (pipeline?.frameMap?.zoom ?: 1.0) * settings.zoomRatio)}x"
-        } ?: "" else ""
-        status.text = getString(R.string.status, p.label, outputWidth, outputHeight, p.fps, s.fps, s.analysisMs, s.neuralMs, stateText, exposure) + lensNow
+        status.text = lensNow() + " · " + getString(R.string.status, p.label, outputWidth, outputHeight, p.fps, s.fps, s.analysisMs, s.neuralMs, stateText, exposure)
         if (zoomConfig.auto) {
-            findViewById<TextView>(R.id.cropZoomLabel).text = getString(R.string.crop_zoom, s.zoom)
-            findViewById<SeekBar>(R.id.cropZoom).progress = ((s.zoom - 1.0) / 0.05).roundToInt()
+            val z = s.zoom * refZoom()
+            findViewById<TextView>(R.id.cropZoomLabel).text = getString(R.string.crop_zoom, z)
+            findViewById<SeekBar>(R.id.cropZoom).progress = ((z - refZoom()) / 0.05).roundToInt()
         }
     }
 
@@ -970,7 +1033,7 @@ class MainActivity : AppCompatActivity() {
         logSettings()
         findViewById<Button>(R.id.lens).text = lensLabel()
         findViewById<Button>(R.id.hybrid).apply {
-            visibility = if (teleRatio() != null) android.view.View.VISIBLE else android.view.View.GONE
+            visibility = if (ladder() != null) android.view.View.VISIBLE else android.view.View.GONE
             text = if (hybridOn) getString(R.string.hybrid_on, hybridFromZoom() ?: 0.0) else getString(R.string.hybrid_off)
         }
         findViewById<Button>(R.id.model).setText(
@@ -1034,9 +1097,8 @@ class MainActivity : AppCompatActivity() {
         const val PREF_TARGET = "targetClasses"
         const val PREF_LENS = "lens"
         const val PREF_HYBRID = "hybridZoom"
-        /** Crop zoom sliders: 1.0x … [ZOOM_SLIDER_MAX] in 0.05 steps. */
-        const val ZOOM_SLIDER_MAX = 8.0
-        val ZOOM_STEPS = ((ZOOM_SLIDER_MAX - 1.0) / 0.05).roundToInt()
+        /** Crop zoom sliders: up to this (vs the main lens). */
+        const val ZOOM_MAX = 10.0
         const val PREF_COCO = "preferCoco"
         const val PREF_CODEC = "codec"
         const val PREF_LAST_VIDEO = "lastVideo"

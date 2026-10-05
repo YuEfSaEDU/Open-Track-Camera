@@ -307,25 +307,29 @@ class RenderPipeline(
         frameMap = map
         val visible = if (map.zoom > 1.0) map.visible else null
         val whole = map.toStream(Box(srcW / 2.0, srcH / 2.0, srcW.toDouble(), srcH.toDouble()))
+        // A longer lens's frame is analysed at its own resolution: the image covers just the part
+        // of the reference frame it shows (else the reference frame, black around the frame).
+        val window = if (visible != null && analysis.supportsWindows) visible else null
+        val analysed = if (window != null) map.toStream(window) else whole
 
-        // 1. Analysis readbacks (in the reference space: a telephoto frame is black around it).
+        // 1. Analysis readbacks.
         lumaTarget.bind()
         renderer.drawPackedLuma(
             texture, texMatrix, analysis.width, analysis.height,
-            (whole.left / srcW).toFloat(), (whole.top / srcH).toFloat(), (whole.width / srcW).toFloat(), (whole.height / srcH).toFloat(),
+            (analysed.left / srcW).toFloat(), (analysed.top / srcH).toFloat(), (analysed.width / srcW).toFloat(), (analysed.height / srcH).toFloat(),
         )
-        analysis.submitLuma(lumaTarget.read(), ts, visible)
+        analysis.submitLuma(lumaTarget.read(), ts, visible, window)
         if (analysis.wantsNeuralFrame()) {
             // The whole frame, or a zoomed region around the target (see DetectionPlanner).
-            val region = analysis.neuralRegion(ts)
+            val region = analysis.neuralRegion(ts, visible)
             val target = if (region == null) rgbTarget else roiTarget
             target.bind()
-            val s = if (region == null) whole else map.toStream(region)
+            val s = if (region == null) analysed else map.toStream(region)
             renderer.drawRegionFiltered(
                 texture, texMatrix, (s.left / srcW).toFloat(), (s.top / srcH).toFloat(),
                 (s.width / srcW).toFloat(), (s.height / srcH).toFloat(), target.width, target.height,
             )
-            analysis.submitNeuralFrame(target.read(), ts, region)
+            analysis.submitNeuralFrame(target.read(), ts, region, if (region == null) window else null)
         }
 
         // 2-3. Causal (live) crop sets zoom and where to capture; keep that region in the ring.
@@ -375,11 +379,8 @@ class RenderPipeline(
             } else {
                 val (x, y, cw, ch) = fit(vw, vh, srcW.toDouble() / srcH)
                 GLES20.glViewport(x, y, cw, ch)
-                // The reference view (main lens 1x): a telephoto frame sits in its middle, so the
-                // picture and the overlay stay put when the lens changes.
-                renderer.drawRegion(
-                    texture, texMatrix, (whole.left / srcW).toFloat(), (whole.top / srcH).toFloat(), (whole.width / srcW).toFloat(), (whole.height / srcH).toFloat(),
-                )
+                // The camera's own frame (whatever lens hybrid zoom is on); the overlay is mapped to it.
+                renderer.drawRegion(texture, texMatrix, 0f, 0f, 1f, 1f)
             }
             egl.swap(pv)
         }
@@ -396,7 +397,7 @@ class RenderPipeline(
             // The overlay must match what is on screen: the live frame, or the delayed output.
             val out = lastOutput
             if (previewMode == PreviewMode.OUTPUT && out != null) publishOverlay(out.timestampNs, out.crop, out.track ?: prediction)
-            else publishOverlay(ts, live, prediction)
+            else publishOverlay(ts, live, prediction, map)
         }
     }
 
@@ -505,7 +506,8 @@ class RenderPipeline(
         return shutter
     }
 
-    private fun publishOverlay(ts: Long, crop: CropWindow, prediction: TrackPrediction) {
+    /** [map]: the wide view shows the camera frame, boxes (reference px) are mapped into it. */
+    private fun publishOverlay(ts: Long, crop: CropWindow, prediction: TrackPrediction, map: ZoomMap? = null) {
         val pose = motion.poseAt(ts)
         val center = Vec2(srcW / 2.0, srcH / 2.0)
         val target = if (prediction.hasTarget) {
@@ -517,9 +519,13 @@ class RenderPipeline(
             val c = pose.toImage(motion.poseAt(d.timestampNs).toWorld(d.box.center, center), center)
             d.copy(box = d.box.movedTo(c))
         }
+        val m = map?.takeIf { it.zoom != 1.0 }
         listener.onOverlay(
             OverlayState(
-                srcW, srcH, previewMode, crop, framing.zoom, prediction.state, target, dets, fps, analysis.lastAnalysisMs, analysis.lastNeuralMs,
+                srcW, srcH, previewMode,
+                m?.let { z -> z.toStream(crop.center).let { c -> crop.copy(cx = c.x, cy = c.y, width = crop.width * z.zoom, height = crop.height * z.zoom) } } ?: crop,
+                framing.zoom, prediction.state, m?.let { z -> target?.let { z.toStream(it) } } ?: target,
+                m?.let { z -> dets.map { it.copy(box = z.toStream(it.box)) } } ?: dets, fps, analysis.lastAnalysisMs, analysis.lastNeuralMs,
                 targetConfirmed = prediction.framable,
             ),
         )

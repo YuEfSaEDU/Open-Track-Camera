@@ -83,7 +83,8 @@
     <string name="recover_ten_bit">10-bit görüntü bu telefonda çalışmadı: HEVC (8-bit) seçildi. %s</string>
     <string name="hybrid_on">Hibrit zoom: açık (tele ≥%.1fx)</string>
     <string name="hybrid_off">Hibrit zoom: kapalı</string>
-    <string name="hybrid_on_hint">Hibrit zoom: %.1fx kırpma zoomundan itibaren telefoto lens kullanılır (büyütme yerine gerçek detay); takip ve stabilizasyon geçişte kesilmez.</string>
+    <string name="hybrid_on_hint">Hibrit zoom: lensler %1$s, kırpmaya göre seçilir: uçak yakındayken geniş açı, %2$.1fx kırpma zoomundan itibaren telefoto; takip ve stabilizasyon geçişlerde kesilmez.</string>
     <string name="hybrid_off_hint">Hibrit zoom kapalı: kamera, kamera zoom kaydırıcısındaki oranda kalır.</string>
-    <string name="hybrid_unavailable">Hibrit zoom için çoklu lens (Lens düğmesi) ve telefotodan düşük bir kamera zoomu gerekir.</string>
+    <string name="hybrid_unavailable">Hibrit zoom için çoklu lens (Lens düğmesi) ve jiroskop gerekir.</string>
+    <string name="lens_zoom_hybrid">Kamera zoom: hibrit (otomatik)</string>
 </resources>

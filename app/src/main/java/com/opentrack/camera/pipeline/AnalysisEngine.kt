@@ -105,10 +105,10 @@ class AnalysisEngine(
      * frame (analysis size). Zoomed regions around the target let the detector recognize
      * aircraft far too small for it in the whole frame; see [DetectionPlanner].
      */
-    fun neuralRegion(timestampNs: Long): Box? {
+    fun neuralRegion(timestampNs: Long, view: Box? = null): Box? {
         val p = tracker.prediction
         val target = if (p.state == TrackState.IDLE) null else motion.poseAt(timestampNs).toImage(p.worldAt(timestampNs), sourceCenter)
-        return planner.next(p, target, timestampNs)
+        return planner.next(p, target, timestampNs, view)
     }
 
     /**
@@ -116,13 +116,15 @@ class AnalysisEngine(
      * the frame of [timestampNs]: [ROI_SIZE] square, or the whole frame at analysis size when
      * [region] is null.
      */
-    fun submitNeuralFrame(rgba: ByteBuffer, timestampNs: Long, region: Box?) {
+    fun submitNeuralFrame(rgba: ByteBuffer, timestampNs: Long, region: Box?, window: Box? = null) {
         val bmp = (if (region == null) bitmap else roiBitmap) ?: return
         val det = neural ?: return
         if (!neuralBusy.compareAndSet(false, true)) return
         lastNeuralStart = SystemClock.uptimeMillis()
         bmp.copyPixelsFromBuffer(rgba)
-        val area = region ?: Box(sourceW / 2, sourceH / 2, sourceW, sourceH)
+        // [window]: the whole-frame run covered only that part (a telephoto frame, see submitLuma).
+        val area = region ?: window ?: Box(sourceW / 2, sourceH / 2, sourceW, sourceH)
+        val runRegion = region ?: window
         detectorExecutor.execute {
             try {
                 if (released) return@execute
@@ -130,9 +132,9 @@ class AnalysisEngine(
                 val m = model
                 val dets = det.detect(bmp, timestampNs, area, targetClasses.labels, m) ?: return@execute
                 lastNeuralMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6
-                neuralResults.add(NeuralRun(timestampNs, region, m.inputPx) to dets)
+                neuralResults.add(NeuralRun(timestampNs, runRegion, m.inputPx) to dets)
                 telemetry?.line("nn")?.i("ts", timestampNs)?.n("ms", lastNeuralMs)?.i("n", dets.size)
-                    ?.let { l -> if (region != null) l.a("roi", region.cx, region.cy, region.width, region.height, digits = 0) else l }?.send()
+                    ?.let { l -> if (runRegion != null) l.a("roi", runRegion.cx, runRegion.cy, runRegion.width, runRegion.height, digits = 0) else l }?.send()
             } catch (e: Exception) {
                 Log.e(TAG, "neural detection failed", e)
             } finally {
@@ -142,12 +144,24 @@ class AnalysisEngine(
     }
 
     /** Render thread: packed luma (width x height bytes, top row first). Dropped if busy. */
-    /** [visible]: the part of the (reference space) frame with camera pixels, null = all. */
-    fun submitLuma(luma: ByteBuffer, timestampNs: Long, visible: Box? = null) {
+    /**
+     * [visible]: the part of the (reference space) frame with camera pixels, null = all.
+     * [window]: the part of the reference frame the image shows (null = all of it): a
+     * telephoto frame is analysed at its own resolution (see [LumaFrame.windowed]).
+     */
+    fun submitLuma(luma: ByteBuffer, timestampNs: Long, visible: Box? = null, window: Box? = null) {
         val buf = freeBuffers.poll() ?: return
         luma.get(buf, 0, width * height)
-        handler.post { process(LumaFrame(width, height, buf, timestampNs, scale, visible)) }
+        val frame = if (window == null) LumaFrame(width, height, buf, timestampNs, scale, visible)
+        else LumaFrame(width, height, buf, timestampNs, window.width / width, visible, window.left, window.top, sourceW, sourceH)
+        handler.post { process(frame) }
     }
+
+    /**
+     * Whether the image may be a window of the reference frame: not with the image-based
+     * motion estimate (no gyro), which compares consecutive images pixel for pixel.
+     */
+    val supportsWindows: Boolean get() = visualMotion == null
 
     private fun process(frame: LumaFrame) {
         try {

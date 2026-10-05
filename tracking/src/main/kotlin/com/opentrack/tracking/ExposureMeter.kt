@@ -39,16 +39,16 @@ object ExposureMeter {
      * weighted in when given.
      */
     fun measure(frame: LumaFrame, crop: CropWindow?, target: Box?): SceneMetering {
-        val s = frame.scale
         // The crop's axis-aligned bounds (its small roll does not matter for metering).
         val (ax0, ay0, ax1, ay1) = if (crop == null) {
             listOf(0, 0, frame.width, frame.height)
         } else {
             val (hx, hy) = crop.halfExtents()
-            bounds((crop.cx - hx) / s, (crop.cy - hy) / s, (crop.cx + hx) / s, (crop.cy + hy) / s, frame)
+            val a = frame.toAnalysis(Box(crop.cx, crop.cy, 2 * hx, 2 * hy))
+            bounds(a.left, a.top, a.right, a.bottom, frame)
         }
         // Only what the camera saw (not the black around a telephoto frame).
-        val (vx0, vy0, vx1, vy1) = frame.visible?.let { bounds(it.left / s, it.top / s, it.right / s, it.bottom / s, frame) }
+        val (vx0, vy0, vx1, vy1) = frame.visible?.let { v -> frame.toAnalysis(v).let { bounds(it.left, it.top, it.right, it.bottom, frame) } }
             ?: listOf(0, 0, frame.width, frame.height)
         val cx0 = max(ax0, vx0)
         val cy0 = max(ay0, vy0)
@@ -78,7 +78,8 @@ object ExposureMeter {
         val highlight = percentile(hist, n, HIGHLIGHT_PERCENTILE)
 
         if (target != null) {
-            val (tx0, ty0, tx1, ty1) = bounds(target.left / s, target.top / s, target.right / s, target.bottom / s, frame)
+            val ta = frame.toAnalysis(target)
+            val (tx0, ty0, tx1, ty1) = bounds(ta.left, ta.top, ta.right, ta.bottom, frame)
             var tSum = 0L
             var tn = 0
             for (ty in ty0 until ty1) for (tx in tx0 until tx1) {

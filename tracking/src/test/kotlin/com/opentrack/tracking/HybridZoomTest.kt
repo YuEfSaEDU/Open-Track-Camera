@@ -80,6 +80,82 @@ class HybridZoomTest {
     }
 
     @Test
+    fun climbsAndDescendsTheLensLadder() {
+        // Reference: the wide angle (0.4x); main at 1x = level 2.5, telephoto 2.6x = level 6.5.
+        val z = HybridZoom(listOf(1.0, 2.5, 6.5), w, h)
+        var t = 0L
+        fun run(c: CropWindow, n: Int = 15) = repeat(n) { t += 100_000_000L; z.update(t, c) }
+        // Aircraft close: a wide crop stays on the wide angle.
+        run(crop(1.5))
+        assertEquals(0, z.level)
+        // Farther: the crop fits the main lens with room (> 3.375x) → main.
+        run(crop(4.0))
+        assertEquals(1, z.level)
+        // Far: fits the telephoto (> 8.775x) → telephoto, one step at a time.
+        run(crop(10.0))
+        assertEquals(2, z.level)
+        // Coming close fast: straight down to the lens that still sees the crop.
+        t += 100_000_000L
+        z.update(t, crop(1.8))
+        assertEquals(0, z.level)
+    }
+
+    @Test
+    fun rescaledTemplateStillMatchesTheZoomedImage() {
+        // A blob tracked in a 640 px image of the whole frame, then in a 2x window of it.
+        // (a 2x window centered on the frame: p' = c + 2 (p - c), the shapes twice as large)
+        val full = SyntheticSky.frame(640, 360, scale = 6.0, objects = listOf(Vec2(330.0, 170.0) to 4.0, Vec2(338.0, 170.0) to 2.0))
+        val tt = TemplateTracker()
+        tt.init(full, Box(332.0, 170.0, 14.0, 9.0))
+        val zoomed = SyntheticSky.frame(640, 360, 1L, scale = 3.0, objects = listOf(Vec2(340.0, 160.0) to 8.0, Vec2(356.0, 160.0) to 4.0), seed = 2)
+        tt.rescale(2.0)
+        val m = tt.track(zoomed, Vec2(342.0, 162.0), 10)!!
+        assertEquals(344.0, m.center.x, 1.0)
+        assertEquals(160.0, m.center.y, 1.0)
+        assertTrue("score ${m.score}", m.score > 0.8)
+    }
+
+    @Test
+    fun lumaFrameWindowMapsToTheSource() {
+        val f = LumaFrame(640, 360, ByteArray(640 * 360), 0L, 2.0, originX = 1280.0, originY = 720.0, sourceWidth = 3840.0, sourceHeight = 2160.0)
+        assertTrue(f.windowed)
+        val p = f.toSource(Vec2(320.0, 180.0))
+        assertEquals(1920.0, p.x, 1e-9)
+        assertEquals(1080.0, p.y, 1e-9)
+        assertEquals(320.0, f.toAnalysis(p).x, 1e-9)
+        assertEquals(1280.0, f.window.width, 1e-9)
+    }
+
+    @Test
+    fun trackerKeepsTheLockWhenTheAnalysisImageSwitchesToATelephotoWindow() {
+        // 1280x720 source; after 1 s the analysis image becomes a 2x window of it (a telephoto
+        // analysed at its own resolution): twice the detail, the aircraft twice as large.
+        val tracker = TargetTracker(CameraMotion.NONE)
+        val start = Vec2(500.0, 400.0)
+        val vel = Vec2(100.0, -30.0)
+        val ns = 16_666_667L
+        var last = TrackPrediction.IDLE
+        for (i in 0 until 120) {
+            val t = i * ns
+            val p = start + vel * (t * 1e-9)
+            val frame = if (i < 60) {
+                SyntheticSky.frame(timestampNs = t, scale = 4.0, objects = listOf(p / 4.0 to 2.0), seed = i)
+            } else {
+                val a = (p - Vec2(320.0, 180.0)) / 2.0
+                val f = SyntheticSky.frame(timestampNs = t, scale = 2.0, objects = listOf(a to 4.0), seed = i)
+                LumaFrame(f.width, f.height, f.data, t, 2.0, originX = 320.0, originY = 180.0, sourceWidth = 1280.0, sourceHeight = 720.0)
+            }
+            if (i == 1) tracker.selectAt(p)
+            last = tracker.process(frame, emptyList())
+            if (i > 2) {
+                assertEquals("frame $i", TrackState.TRACKING, last.state)
+                assertEquals("frame $i x", p.x, last.world.x, 4.0)
+                assertEquals("frame $i y", p.y, last.world.y, 4.0)
+            }
+        }
+    }
+
+    @Test
     fun framingStaysInsideTheVisibleWindow() {
         val f = FramingController(w, h, 16.0 / 9, CameraMotion.NONE)
         f.zoom = 4.0
