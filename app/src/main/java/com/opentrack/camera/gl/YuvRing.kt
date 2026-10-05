@@ -4,6 +4,8 @@ import android.opengl.GLES20
 import android.opengl.GLES30
 import com.opentrack.tracking.Box
 import com.opentrack.tracking.CropWindow
+import com.opentrack.tracking.ZoomMap
+import com.opentrack.tracking.intersect
 import java.nio.FloatBuffer
 import kotlin.math.cos
 import kotlin.math.sin
@@ -32,7 +34,12 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
 
     class Slot(val yTex: Int, val uvTex: Int, val yFbo: Int, val uvFbo: Int) {
         var timestampNs = Long.MIN_VALUE
+        /** The stored region (reference px). */
         var capture: Box? = null
+        /** The part of [capture] with camera pixels (the rest is black: outside a telephoto frame). */
+        var valid: Box? = null
+        /** The frame's camera zoom ratio. */
+        var zoom = 1.0
     }
 
     private val slots: Array<Slot> = Array(capacity) { createSlot() }
@@ -41,14 +48,21 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
 
     val bytes: Long get() = slots.size.toLong() * slotWidth * slotHeight * 3 / 2
 
-    /** Stores the current camera frame's [capture] region (source px) in the next slot. */
-    fun store(renderer: FrameRenderer, texture: Int, texMatrix: FloatArray, sourceW: Int, sourceH: Int, capture: Box, timestampNs: Long) {
+    /**
+     * Stores the current camera frame's [capture] region (reference px: the main lens at 1x) in
+     * the next slot; [map] places the frame, taken at some camera zoom ratio, in that space.
+     */
+    fun store(
+        renderer: FrameRenderer, texture: Int, texMatrix: FloatArray, sourceW: Int, sourceH: Int, capture: Box, timestampNs: Long,
+        map: ZoomMap = ZoomMap.identity(sourceW, sourceH),
+    ) {
         val slot = slots[next]
         next = (next + 1) % slots.size
-        val l = (capture.left / sourceW).toFloat()
-        val t = (capture.top / sourceH).toFloat()
-        val w = (capture.width / sourceW).toFloat()
-        val h = (capture.height / sourceH).toFloat()
+        val s = map.toStream(capture)
+        val l = (s.left / sourceW).toFloat()
+        val t = (s.top / sourceH).toFloat()
+        val w = (s.width / sourceW).toFloat()
+        val h = (s.height / sourceH).toFloat()
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, slot.yFbo)
         GLES20.glViewport(0, 0, slotWidth, slotHeight)
         renderer.drawLumaPlane(texture, texMatrix, l, t, w, h, slotWidth, slotHeight, sourceW, sourceH)
@@ -58,6 +72,8 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         slot.timestampNs = timestampNs
         slot.capture = capture
+        slot.valid = if (map.zoom > 1.0) capture.intersect(map.visible) else capture
+        slot.zoom = map.zoom
     }
 
     fun find(timestampNs: Long): Slot? = slots.firstOrNull { it.timestampNs == timestampNs }

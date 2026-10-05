@@ -284,6 +284,21 @@ class CameraController(
     private var shotNext = 0
     private val shotLock = Any()
 
+    // Zoom ratio of recent frames by sensor timestamp (the render thread maps each frame by it).
+    private val zoomTs = LongArray(SHOT_HISTORY)
+    private val zoomRatio = FloatArray(SHOT_HISTORY)
+    private var zoomNext = 0
+
+    /** The physical lens of a multi-camera the latest frame came from (null if not reported). */
+    @Volatile var activePhysicalId: String? = null
+        private set
+
+    /** The zoom ratio the frame of [timestampNs] was taken with, once its capture result is in. */
+    fun zoomAt(timestampNs: Long): Double? = synchronized(shotLock) {
+        for (k in 0 until SHOT_HISTORY) if (zoomTs[k] == timestampNs && zoomRatio[k] > 0f) return zoomRatio[k].toDouble()
+        null
+    }
+
     private fun shotSettings(timestampNs: Long): Pair<Long, Int>? = synchronized(shotLock) {
         // The frame itself, or failing that the closest one within 20 ms; if the clocks do not
         // match at all, the latest result (a few frames off, still far better than nothing).
@@ -310,7 +325,12 @@ class CameraController(
                 shotExposure[shotNext] = exposure
                 shotIso[shotNext] = lastIso
                 shotNext = (shotNext + 1) % SHOT_HISTORY
+                zoomTs[zoomNext] = ts
+                // The ratio the frame was taken with; a HAL that does not report it did what was asked.
+                zoomRatio[zoomNext] = result.get(CaptureResult.CONTROL_ZOOM_RATIO) ?: result.request.get(CaptureRequest.CONTROL_ZOOM_RATIO) ?: 1f
+                zoomNext = (zoomNext + 1) % SHOT_HISTORY
             }
+            result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { activePhysicalId = it }
             if (result.get(CaptureResult.CONTROL_AE_MODE) != CameraMetadata.CONTROL_AE_MODE_OFF) {
                 aeSettled = when (result.get(CaptureResult.CONTROL_AE_STATE)) {
                     CameraMetadata.CONTROL_AE_STATE_CONVERGED, CameraMetadata.CONTROL_AE_STATE_LOCKED, CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED -> true

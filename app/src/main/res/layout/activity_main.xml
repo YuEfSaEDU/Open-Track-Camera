@@ -106,6 +106,7 @@
             <Button android:id="@+id/ois" style="@style/ControlToggle" />
             <Button android:id="@+id/shutter" style="@style/ControlToggle" />
             <Button android:id="@+id/lens" style="@style/ControlToggle" />
+            <Button android:id="@+id/hybrid" style="@style/ControlToggle" />
             <Button android:id="@+id/resolution" style="@style/ControlToggle" />
             <Button android:id="@+id/outputRes" style="@style/ControlToggle" />
             <Button android:id="@+id/codec" style="@style/ControlToggle" />

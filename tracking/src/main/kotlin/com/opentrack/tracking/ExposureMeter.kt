@@ -41,12 +41,19 @@ object ExposureMeter {
     fun measure(frame: LumaFrame, crop: CropWindow?, target: Box?): SceneMetering {
         val s = frame.scale
         // The crop's axis-aligned bounds (its small roll does not matter for metering).
-        val (cx0, cy0, cx1, cy1) = if (crop == null) {
+        val (ax0, ay0, ax1, ay1) = if (crop == null) {
             listOf(0, 0, frame.width, frame.height)
         } else {
             val (hx, hy) = crop.halfExtents()
             bounds((crop.cx - hx) / s, (crop.cy - hy) / s, (crop.cx + hx) / s, (crop.cy + hy) / s, frame)
         }
+        // Only what the camera saw (not the black around a telephoto frame).
+        val (vx0, vy0, vx1, vy1) = frame.visible?.let { bounds(it.left / s, it.top / s, it.right / s, it.bottom / s, frame) }
+            ?: listOf(0, 0, frame.width, frame.height)
+        val cx0 = max(ax0, vx0)
+        val cy0 = max(ay0, vy0)
+        val cx1 = min(ax1, vx1)
+        val cy1 = min(ay1, vy1)
         // Coarse sampling of a large crop keeps this well under a millisecond.
         val area = (cx1 - cx0).toLong() * (cy1 - cy0)
         val step = if (area > 60_000) 2 else 1

@@ -155,6 +155,12 @@ class FramingController(
         return w to h
     }
 
+    /**
+     * The part of the frame (source px) with real pixels, when the camera is zoomed in (a
+     * telephoto frame in the main lens's reference space); null = the whole frame.
+     */
+    var visible: Box? = null
+
     fun update(timestampNs: Long, track: TrackPrediction): CropWindow {
         val dtZoom = if (initialized) ((timestampNs - lastNs) * 1e-9).coerceIn(0.0, 0.1) else 0.0
         if (zoomConfig.auto) {
@@ -237,8 +243,9 @@ class FramingController(
         // Back to image space and keep the (rotated) crop inside the sensor frame.
         val ext = CropWindow.rotatedHalfExtents(cw, ch, rotation)
         val wanted = pose.toImage(Vec2(sx, sy), center)
-        val cx = wanted.x.clampSafe(ext.x, sourceWidth - ext.x)
-        val cy = wanted.y.clampSafe(ext.y, sourceHeight - ext.y)
+        val vis = visible
+        val cx = wanted.x.clampSafe(max(ext.x, (vis?.left ?: 0.0) + ext.x), min(sourceWidth - ext.x, (vis?.right ?: sourceWidth.toDouble()) - ext.x))
+        val cy = wanted.y.clampSafe(max(ext.y, (vis?.top ?: 0.0) + ext.y), min(sourceHeight - ext.y, (vis?.bottom ?: sourceHeight.toDouble()) - ext.y))
         if (cx != wanted.x || cy != wanted.y) {
             // Anti wind-up: when clamped, move the virtual camera to where the crop really is.
             val w = pose.toWorld(Vec2(cx, cy), center)

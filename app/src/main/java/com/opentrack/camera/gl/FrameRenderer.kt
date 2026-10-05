@@ -50,11 +50,16 @@ class FrameRenderer {
     }
 
     /**
-     * Renders the whole frame as box-filtered luminance, four analysis pixels packed per
-     * RGBA texel. The target framebuffer must be (analysisWidth / 4) x analysisHeight.
+     * Renders the [left, top, width, height] image region (default: the whole frame; with a
+     * zoomed camera, the reference frame around it, black outside) as box-filtered luminance,
+     * four analysis pixels packed per RGBA texel. The target framebuffer must be
+     * (analysisWidth / 4) x analysisHeight.
      */
-    fun drawPackedLuma(texture: Int, texMatrix: FloatArray, analysisWidth: Int, analysisHeight: Int) {
-        luma.draw(texture, texMatrix, 0f, 0f, 1f, 1f, true, 1f / analysisWidth, 1f / analysisHeight)
+    fun drawPackedLuma(
+        texture: Int, texMatrix: FloatArray, analysisWidth: Int, analysisHeight: Int,
+        left: Float = 0f, top: Float = 0f, width: Float = 1f, height: Float = 1f,
+    ) {
+        luma.draw(texture, texMatrix, left, top, width, height, true, width / analysisWidth, height / analysisHeight)
     }
 
     /**
@@ -136,6 +141,11 @@ class FrameRenderer {
             uniform mat4 uTexMatrix;
             uniform int uRotation;
             varying highp vec2 vImg;
+            // 1 inside the camera image, 0 outside: regions given in a zoomed-out reference space
+            // (a telephoto frame drawn where the main lens would see it) are black around it.
+            float inImage(vec2 img) {
+                return step(0.0, img.x) * step(img.x, 1.0) * step(0.0, img.y) * step(img.y, 1.0);
+            }
             vec2 imgToTex(vec2 img) {
                 vec2 n;
                 if (uRotation == 1) n = vec2(1.0 - img.y, img.x);
@@ -148,7 +158,7 @@ class FrameRenderer {
 
         const val DISPLAY_FRAGMENT = COMMON + """
             void main() {
-                gl_FragColor = texture2D(sTex, imgToTex(vImg));
+                gl_FragColor = vec4(texture2D(sTex, imgToTex(vImg)).rgb * inImage(vImg), 1.0);
             }
         """
 
@@ -158,7 +168,8 @@ class FrameRenderer {
                 vec3 acc = vec3(0.0);
                 for (int j = -1; j <= 1; j++) {
                     for (int i = -1; i <= 1; i++) {
-                        acc += texture2D(sTex, imgToTex(vImg + vec2(float(i), float(j)) * uPx / 3.0)).rgb;
+                        vec2 p = vImg + vec2(float(i), float(j)) * uPx / 3.0;
+                        acc += texture2D(sTex, imgToTex(p)).rgb * inImage(p);
                     }
                 }
                 gl_FragColor = vec4(acc / 9.0, 1.0);
@@ -170,7 +181,7 @@ class FrameRenderer {
             uniform vec2 uPx;
             uniform vec2 uSrc;
             float lumaAt(vec2 p) {
-                return dot(texture2D(sTex, imgToTex(p)).rgb, vec3(0.299, 0.587, 0.114));
+                return dot(texture2D(sTex, imgToTex(p)).rgb, vec3(0.299, 0.587, 0.114)) * inImage(p);
             }
             // Catmull-Rom bicubic from 9 bilinear taps placed on the source pixel grid.
             float bicubic(vec2 p) {
@@ -211,6 +222,7 @@ class FrameRenderer {
                        + texture2D(sTex, imgToTex(vImg + vec2(0.5, -0.5) * uPx)).rgb
                        + texture2D(sTex, imgToTex(vImg + vec2(-0.5, 0.5) * uPx)).rgb
                        + texture2D(sTex, imgToTex(vImg + vec2(0.5, 0.5) * uPx)).rgb;
+                c *= inImage(vImg); // black (neutral chroma) outside the camera image
                 c *= 0.25;
                 float cb = -0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b + 0.5;
                 float cr = 0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b + 0.5;
@@ -224,7 +236,8 @@ class FrameRenderer {
                 vec3 acc = vec3(0.0);
                 for (int j = -1; j <= 1; j++) {
                     for (int i = -1; i <= 1; i++) {
-                        acc += texture2D(sTex, imgToTex(c + vec2(float(i), float(j)) * uPx / 3.0)).rgb;
+                        vec2 p = c + vec2(float(i), float(j)) * uPx / 3.0;
+                        acc += texture2D(sTex, imgToTex(p)).rgb * inImage(p);
                     }
                 }
                 return dot(acc / 9.0, vec3(0.299, 0.587, 0.114));

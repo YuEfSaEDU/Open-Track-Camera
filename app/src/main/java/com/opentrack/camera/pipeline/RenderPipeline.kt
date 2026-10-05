@@ -17,6 +17,7 @@ import com.opentrack.tracking.Box
 import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.CropWindow
 import com.opentrack.tracking.FramingController
+import com.opentrack.tracking.HybridZoom
 import com.opentrack.tracking.LookaheadFramer
 import com.opentrack.tracking.PerspectiveView
 import com.opentrack.tracking.RollingShutter
@@ -24,6 +25,8 @@ import com.opentrack.tracking.StabilizerConfig
 import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackPrediction
 import com.opentrack.tracking.Vec2
+import com.opentrack.tracking.ZoomMap
+import com.opentrack.tracking.intersect
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
@@ -60,6 +63,39 @@ class RenderPipeline(
         fun onOverlay(state: OverlayState)
         /** Every frame has been failing to render (e.g. a 10-bit surface the phone cannot draw); once. */
         fun onRenderError(message: String) {}
+        /** Hybrid zoom wants the camera at this zoom ratio (1 = main lens, else the telephoto's). */
+        fun onZoomRequest(ratio: Double) {}
+    }
+
+    /**
+     * The zoom ratio a frame was taken with (from its capture result), by sensor timestamp; null
+     * until the result is in. Tracking, framing and stabilization run in the reference space
+     * (main lens at 1x); each frame is mapped into it with its own ratio, so a zoom or lens
+     * change keeps them continuous.
+     */
+    @Volatile var zoomAt: ((Long) -> Double?)? = null
+
+    /** The camera zoom ratio that is the reference space (the user's; hybrid zoom goes beyond it). */
+    @Volatile var baseZoom = 1.0
+
+    /** Picks the zoom ratio (lens) of a multi-camera from the crop, relative to [baseZoom]; null = fixed zoom. */
+    @Volatile var hybrid: HybridZoom? = null
+
+    /** The zoom ratio last asked of the camera (by hybrid zoom or the user). */
+    @Volatile var requestedZoom = 1.0
+        private set
+    private var requestedAtNs = 0L
+    private var lastZoom = 1.0
+    private var zoomReported = false
+
+    /** The mapping of the latest camera frame (for the overlay and taps). */
+    @Volatile var frameMap: ZoomMap = ZoomMap.identity(profile.sourceSize.width, profile.sourceSize.height)
+        private set
+
+    /** The user (camera zoom slider) or hybrid zoom asked the camera for [ratio]. */
+    fun zoomRequested(ratio: Double) {
+        requestedZoom = ratio
+        requestedAtNs = System.nanoTime()
     }
 
     /** The last render error, for the camera report. */
@@ -266,23 +302,29 @@ class RenderPipeline(
             pendingRecordStart = false
         }
 
-        // 1. Analysis readbacks.
+        // 0. Where this frame sits in the reference space (its own zoom ratio / lens).
+        val map = ZoomMap(frameZoom(ts) / baseZoom, srcW, srcH)
+        frameMap = map
+        val visible = if (map.zoom > 1.0) map.visible else null
+        val whole = map.toStream(Box(srcW / 2.0, srcH / 2.0, srcW.toDouble(), srcH.toDouble()))
+
+        // 1. Analysis readbacks (in the reference space: a telephoto frame is black around it).
         lumaTarget.bind()
-        renderer.drawPackedLuma(texture, texMatrix, analysis.width, analysis.height)
-        analysis.submitLuma(lumaTarget.read(), ts)
+        renderer.drawPackedLuma(
+            texture, texMatrix, analysis.width, analysis.height,
+            (whole.left / srcW).toFloat(), (whole.top / srcH).toFloat(), (whole.width / srcW).toFloat(), (whole.height / srcH).toFloat(),
+        )
+        analysis.submitLuma(lumaTarget.read(), ts, visible)
         if (analysis.wantsNeuralFrame()) {
             // The whole frame, or a zoomed region around the target (see DetectionPlanner).
             val region = analysis.neuralRegion(ts)
             val target = if (region == null) rgbTarget else roiTarget
             target.bind()
-            if (region == null) {
-                renderer.drawRegionFiltered(texture, texMatrix, 0f, 0f, 1f, 1f, target.width, target.height)
-            } else {
-                renderer.drawRegionFiltered(
-                    texture, texMatrix, (region.left / srcW).toFloat(), (region.top / srcH).toFloat(),
-                    (region.width / srcW).toFloat(), (region.height / srcH).toFloat(), target.width, target.height,
-                )
-            }
+            val s = if (region == null) whole else map.toStream(region)
+            renderer.drawRegionFiltered(
+                texture, texMatrix, (s.left / srcW).toFloat(), (s.top / srcH).toFloat(),
+                (s.width / srcW).toFloat(), (s.height / srcH).toFloat(), target.width, target.height,
+            )
             analysis.submitNeuralFrame(target.read(), ts, region)
         }
 
@@ -290,19 +332,28 @@ class RenderPipeline(
         val prediction = tracker.prediction
         // A tentative lock (not yet confirmed as an aircraft) is tracked but not framed.
         val framed = prediction.forFraming()
+        framing.visible = visible
         val live = framing.update(ts, framed)
         analysis.meterCrop = live
+        hybrid?.let { hz ->
+            val r = hz.update(ts, live) * baseZoom
+            if (r != requestedZoom) {
+                zoomRequested(r)
+                listener.onZoomRequest(r)
+            }
+        }
         val capture = captureFor(live)
-        ring?.store(renderer, texture, texMatrix, srcW, srcH, capture, ts)
+        ring?.store(renderer, texture, texMatrix, srcW, srcH, capture, ts, map)
         telemetry?.let { t ->
             val pose = motion.poseAt(ts)
             t.line("live").i("ts", ts).a("crop", live.cx, live.cy, live.width, live.height).n("rot", live.rotation, 4)
                 .n("zoom", framing.zoom, 3).a("pose", pose.offset.x, pose.offset.y).n("roll", pose.roll, 4)
-                .s("state", prediction.state.name).b("framed", framed.hasTarget).send()
+                .s("state", prediction.state.name).b("framed", framed.hasTarget).n("z", map.zoom, 2).send()
         }
 
         // 4. Stabilized output for the delayed frame.
-        framer.addFrame(ts, live.width, live.height, capture)
+        // The look-ahead path may only use pixels the camera has (inside a telephoto frame).
+        framer.addFrame(ts, live.width, live.height, visible?.let { capture.intersect(it) } ?: capture)
         framer.updateTrack(framed)
         framer.emit()?.let { out ->
             lastOutput = out
@@ -320,11 +371,15 @@ class RenderPipeline(
             if (previewMode == PreviewMode.OUTPUT && out != null) {
                 val (x, y, cw, ch) = fit(vw, vh, out.crop.width / out.crop.height)
                 GLES20.glViewport(x, y, cw, ch)
-                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop, shutterFor(out.timestampNs), homographyFor(out, it), YuvRing.sharpenFor(outputWidth / out.crop.width)) } }
+                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop, shutterFor(out.timestampNs, it.zoom), homographyFor(out, it), YuvRing.sharpenFor(outputWidth / (out.crop.width * it.zoom))) } }
             } else {
                 val (x, y, cw, ch) = fit(vw, vh, srcW.toDouble() / srcH)
                 GLES20.glViewport(x, y, cw, ch)
-                renderer.drawRegion(texture, texMatrix, 0f, 0f, 1f, 1f)
+                // The reference view (main lens 1x): a telephoto frame sits in its middle, so the
+                // picture and the overlay stay put when the lens changes.
+                renderer.drawRegion(
+                    texture, texMatrix, (whole.left / srcW).toFloat(), (whole.top / srcH).toFloat(), (whole.width / srcW).toFloat(), (whole.height / srcH).toFloat(),
+                )
             }
             egl.swap(pv)
         }
@@ -351,7 +406,8 @@ class RenderPipeline(
         egl.makeCurrent(enc)
         GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
         val h = homographyFor(out, slot)
-        ring?.draw(slot, out.crop, shutterFor(out.timestampNs), h, YuvRing.sharpenFor(encoderWidth / out.crop.width))
+        // Enlargement of the camera's own pixels: a telephoto slot has zoom x more per reference px.
+        ring?.draw(slot, out.crop, shutterFor(out.timestampNs, slot.zoom), h, YuvRing.sharpenFor(encoderWidth / (out.crop.width * slot.zoom)))
         egl.setPresentationTime(enc, out.timestampNs)
         egl.swap(enc)
         telemetry?.let { t ->
@@ -372,6 +428,29 @@ class RenderPipeline(
      * perspective view on, it shifts (within its margin) towards the side where the corrected
      * view of an off-axis crop needs more pixels.
      */
+    /**
+     * The zoom ratio frame [ts] was taken with. Its capture result usually arrives before the
+     * frame; right after a zoom request it may not have, and guessing wrong there would jump the
+     * picture for a frame, so it is briefly waited for.
+     */
+    private fun frameZoom(ts: Long): Double {
+        val lookup = zoomAt ?: return lastZoom
+        var z = lookup(ts)
+        if (z == null && System.nanoTime() - requestedAtNs < ZOOM_WAIT_WINDOW_NS) {
+            val until = System.nanoTime() + ZOOM_WAIT_NS
+            while (z == null && System.nanoTime() < until) {
+                Thread.sleep(1)
+                z = lookup(ts)
+            }
+        }
+        if (z != null && z > 0) {
+            lastZoom = z
+            zoomReported = true
+        }
+        // A camera that never reports its zoom ratio: assume it does what it was asked.
+        return if (zoomReported) lastZoom else requestedZoom
+    }
+
     private fun captureFor(live: CropWindow): Box {
         var cx = live.cx
         var cy = live.cy
@@ -399,7 +478,8 @@ class RenderPipeline(
         if (out.timestampNs == viewTs) return viewHomography
         viewTs = out.timestampNs
         val v = view?.takeIf { it.focalPx == f } ?: PerspectiveView(srcW, srcH, f).also { view = it }
-        val cap = slot.capture ?: return null
+        // Only the part of the slot with camera pixels (inside the sensor, inside a telephoto frame).
+        val cap = slot.valid ?: slot.capture ?: return null
         val l = max(cap.left, 0.0)
         val t = max(cap.top, 0.0)
         val r = min(cap.right, srcW.toDouble())
@@ -412,13 +492,14 @@ class RenderPipeline(
     }
 
     /** Rolling shutter correction for the frame of [ts] (computed once per output frame). */
-    private fun shutterFor(ts: Long): YuvRing.ShutterCorrection? {
+    private fun shutterFor(ts: Long, zoom: Double): YuvRing.ShutterCorrection? {
         val rs = rollingShutter ?: return null
         if (ts != shutterTs) {
             shutterTs = ts
             shutter = YuvRing.ShutterCorrection(
                 rs.corrections(motion, ts, YuvRing.ShutterCorrection.SAMPLES),
-                rs.readoutDir.x.toFloat(), rs.readoutDir.y.toFloat(), rs.extentPx.toFloat(), srcW / 2f, srcH / 2f,
+                                // A zoomed frame's readout sweeps only the part of the reference frame it shows.
+                rs.readoutDir.x.toFloat(), rs.readoutDir.y.toFloat(), (rs.extentPx / zoom).toFloat(), srcW / 2f, srcH / 2f,
             )
         }
         return shutter
@@ -481,5 +562,9 @@ class RenderPipeline(
 
         /** Per output frame: how fast the perspective correction returns after backing off. */
         const val VIEW_STRENGTH_RISE = 0.02
+
+        /** After a zoom request: frames whose zoom ratio is not known yet wait for it, up to... */
+        const val ZOOM_WAIT_WINDOW_NS = 500_000_000L
+        const val ZOOM_WAIT_NS = 12_000_000L
     }
 }

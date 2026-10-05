@@ -379,6 +379,36 @@ seçilir. Listelenmeyen bir lens açılmazsa (`openCamera` hatası ya da oturum 
 gelmeden) uygulama ana lense döner. Odak uzaklığı (`focalPx`) her lensin kendi değerleridir; jiroskop,
 perspektif ve rolling shutter buna göre çalışır.
 
+### Hibrit zoom (`HybridZoom`, `ZoomMap`)
+
+Çoklu lens (mantıksal çok-kamera, Honor 200 Pro'da kamera 4: ana + geniş + tele) seçiliyken kırpma
+telefotonun görüş alanına sığınca kamera zoom oranı telefoto oranına (tele lensin ana lense göre
+görüş açısı, 0.1 yukarı yuvarlanmış; ~2.6x) çıkarılır ve HAL tele lense geçer; kırpma büyütülmek
+yerine telefotonun gerçek pikselleriyle doldurulur. Geçiş kesintisiz olsun diye:
+
+- Takip, kadraj, stabilizasyon, jiroskop ve perspektif **referans uzayda** çalışır: kullanıcının
+  kamera zoomundaki (normalde 1x, ana lens) görüntü, `focalPx` da onun. Her karenin kendi zoom oranı
+  capture result'tan (`CONTROL_ZOOM_RATIO`, zaman damgasıyla eşlenir; `CameraController.zoomAt`)
+  okunur ve kare `ZoomMap` (merkez etrafında `zoom` kat ölçek) ile referans uzaya yerleştirilir:
+  analiz görüntüsü, sinir ağı bölgeleri, halka tampondaki kayıt ve önizleme. Zoom değişirken lens
+  değişse bile yörünge ve kilit sürekli kalır; yalnız piksel okumaları değişir.
+- Telefoto karesinin referans uzayda kapsamadığı yer siyahtır (`inImage` maskesi). Kadraj
+  (`FramingController.visible`) kırpmayı görünen bölgede tutar, look-ahead yolu her kare için
+  `capture ∩ visible` ile sınırlanır, perspektif düzeltmesi yalnız geçerli bölgeye sığar, gökyüzü
+  dedektörü kenara değen lekeleri, pozometre siyah kısmı yok sayar.
+- Karar histerezisli: kırpma %35 payla 0.3 s telefotoya sığarsa girer, %10 payla sığmadığı anda
+  çıkar (gecikmesiz: kırpma birazdan telefotoda olmayan piksel isteyecek), her lenste en az 1 s.
+  Kırpma zoomu `teleRatio × 1.35`'ten (~3.5x) büyükken telefoto kullanılır; düğme bu eşiği gösterir,
+  açılırken otomatik zoom üst sınırı gerekirse yükseltilir.
+- Zoom isteğinden sonraki 0.5 s içinde sonucu henüz gelmemiş kare 12 ms'ye kadar bekletilir (yanlış
+  oranla tek kare bile sıçrama olurdu). Zoom oranını bildirmeyen HAL'de istenen oran kullanılır.
+
+Bilinen sınırlar: iki lens arasındaki küçük hizalama farkı (paralaks, HAL kalibrasyonu) ve renk /
+pozlama farkı geçişte görünebilir; ölçmek için kayıt günlüğünde `cam.phys` / `cam.zoom` her kare ve
+`live.z` var. Takipçinin rolling shutter modeli telefotoda ana lensin okuma süresini kullanır.
+Görsel hareket tahmini (jiroskopsuz) telefoto karesinin siyah kenarını hesaba katmaz (hibrit zoom
+jiroskopla kullanılır).
+
 ## Gerçek video testleri
 
 `tools/video_bench/run_bench.py` ile açık lisanslı 6 hava gösterisi videosu (Wikimedia Commons ve
@@ -523,6 +553,8 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
 - [ ] Kayıt günlüğü `Download/OpenTrack`'te videoyla aynı adla çıkıyor mu; `summarize.py` `out`
       kare hızını videoyla aynı ve `dropped: 0` gösteriyor mu.
 - [ ] Lens düğmesi: geniş açı açılıyor mu, açılmıyorsa ana lense dönüş mesajı geliyor mu.
+- [ ] Hibrit zoom (Lens: çoklu): kırpma zoomu eşiği geçince durum satırında `kam 3 2.6x` oluyor mu,
+      geçişte kadraj yerinde kalıyor mu, takip kopuyor mu.
 
 ## Yol haritası
 
@@ -543,7 +575,8 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
    (0.768) ama daha çok yanlış kilit (0.130). Yalnız sinir ağı yine yetmiyor (doğru 0.56): uzak uçak
    için gökyüzü dedektörü gerekli. Sonraki: `medium` veri, SOLOTÜRK tipi karelerin (video bazında
    ayrılmış) eğitime eklenmesi, helikopter/drone test videoları.
-6. **Hibrit zoom**: otomatik zoom kırpma sınırına dayanınca lens zumunu kontrollü değiştirmek.
+6. **Hibrit zoom**: ilk sürüm uygulamada (yukarıda). Sonraki: geçişteki lens hizalama farkını
+   görüntüden ölçüp düzeltmek, iki lensin pozlama/renk eşleşmesi.
 7. **ADS-B entegrasyonu**: yakındaki uçakların konumundan hedefin ekrandaki yerini tahmin edip
    ön-kilit, kaybolunca arama yönü.
 8. Eşzamanlı ham 4K kayıt, 10-bit HEVC / log profil, tam manuel pozlama arayüzü.

@@ -81,4 +81,9 @@
     <string name="recover_vendor">Üretici anahtarlarıyla (üretici deneyi) görüntü gelmedi: kapatıldı. %s</string>
     <string name="recover_forced">Zorlanmış 4K60 modunda görüntü gelmedi: listelenen modlara dönüldü. %s</string>
     <string name="recover_ten_bit">10-bit görüntü bu telefonda çalışmadı: HEVC (8-bit) seçildi. %s</string>
+    <string name="hybrid_on">Hibrit zoom: açık (tele ≥%.1fx)</string>
+    <string name="hybrid_off">Hibrit zoom: kapalı</string>
+    <string name="hybrid_on_hint">Hibrit zoom: %.1fx kırpma zoomundan itibaren telefoto lens kullanılır (büyütme yerine gerçek detay); takip ve stabilizasyon geçişte kesilmez.</string>
+    <string name="hybrid_off_hint">Hibrit zoom kapalı: kamera, kamera zoom kaydırıcısındaki oranda kalır.</string>
+    <string name="hybrid_unavailable">Hibrit zoom için çoklu lens (Lens düğmesi) ve telefotodan düşük bir kamera zoomu gerekir.</string>
 </resources>

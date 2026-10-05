@@ -84,4 +84,9 @@
     <string name="recover_vendor">No picture with the maker\'s keys (vendor experiment): turned it off. %s</string>
     <string name="recover_forced">No picture in the forced 4K60 mode: back to the listed modes. %s</string>
     <string name="recover_ten_bit">10-bit picture does not work on this phone: switched to HEVC (8-bit). %s</string>
+    <string name="hybrid_on">Hybrid zoom: on (tele ≥%.1fx)</string>
+    <string name="hybrid_off">Hybrid zoom: off</string>
+    <string name="hybrid_on_hint">Hybrid zoom: from a crop zoom of %.1fx the telephoto lens is used (real detail instead of enlarging); tracking and stabilization carry on across the switch.</string>
+    <string name="hybrid_off_hint">Hybrid zoom off: the camera stays at the camera zoom slider.</string>
+    <string name="hybrid_unavailable">Hybrid zoom needs the multi lens (Lens button) with a telephoto, at a camera zoom below it.</string>
 </resources>

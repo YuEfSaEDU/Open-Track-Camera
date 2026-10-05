@@ -142,10 +142,11 @@ class AnalysisEngine(
     }
 
     /** Render thread: packed luma (width x height bytes, top row first). Dropped if busy. */
-    fun submitLuma(luma: ByteBuffer, timestampNs: Long) {
+    /** [visible]: the part of the (reference space) frame with camera pixels, null = all. */
+    fun submitLuma(luma: ByteBuffer, timestampNs: Long, visible: Box? = null) {
         val buf = freeBuffers.poll() ?: return
         luma.get(buf, 0, width * height)
-        handler.post { process(LumaFrame(width, height, buf, timestampNs, scale)) }
+        handler.post { process(LumaFrame(width, height, buf, timestampNs, scale, visible)) }
     }
 
     private fun process(frame: LumaFrame) {
@@ -161,7 +162,7 @@ class AnalysisEngine(
             }
             val tracking = tracker.prediction.state == TrackState.TRACKING
             val skyEvery = if (tracking) 12 else 3
-            if (mode != Mode.NEURAL_ONLY && frameIndex % skyEvery == 0L) detections += skyBlob.detect(frame)
+            if (mode != Mode.NEURAL_ONLY && frameIndex % skyEvery == 0L) detections += skyBlob.detect(frame).filter { d -> frame.visible?.let { inside(d.box, it) } ?: true }
             val meterNow = frameIndex % 6 == 0L
             frameIndex++
             visualMotion?.process(frame, lastTargetBox)
@@ -220,6 +221,12 @@ class AnalysisEngine(
         line.send()
     }
 
+    /** Whether [b] is well inside [v]: a blob touching a telephoto frame's black edge is that edge. */
+    private fun inside(b: Box, v: Box): Boolean {
+        val m = EDGE_MARGIN_PX * scale
+        return b.left >= v.left + m && b.right <= v.right - m && b.top >= v.top + m && b.bottom <= v.bottom - m
+    }
+
     fun selectAt(point: Vec2) = handler.post { tracker.selectAt(point) }
 
     fun clearTarget() = handler.post { tracker.clear() }
@@ -235,6 +242,8 @@ class AnalysisEngine(
 
     companion object {
         private const val TAG = "AnalysisEngine"
+        /** Analysis px a sky blob must keep from a telephoto frame's edge. */
+        private const val EDGE_MARGIN_PX = 2.0
         /**
          * Side of the rendered zoomed detector region: the own model's input (384); MediaPipe
          * shrinks it for the COCO model (320).

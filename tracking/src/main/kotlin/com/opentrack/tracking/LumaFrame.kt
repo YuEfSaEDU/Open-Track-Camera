@@ -12,6 +12,12 @@ class LumaFrame(
     val data: ByteArray,
     val timestampNs: Long,
     val scale: Double,
+    /**
+     * The part of the image the camera actually saw (source px), when less than the whole
+     * frame: a zoomed (telephoto) frame drawn in the main lens's reference space is black
+     * around it. Null = everything.
+     */
+    val visible: Box? = null,
 ) {
     init {
         require(data.size >= width * height) { "buffer too small: ${data.size} < ${width * height}" }
