@@ -1,6 +1,7 @@
 package com.opentrack.tracking
 
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import kotlin.math.abs
 import kotlin.math.sin
@@ -137,5 +138,28 @@ class LookaheadFramerTest {
         val (glide, end) = maxStep(0.8)
         assertTrue("glide step $glide px vs snap $snap px", glide < snap / 2 && glide < 40.0)
         assertTrue("ended $end px from the target", end < 10.0)
+    }
+
+    @Test
+    fun cropSizeStepIsEasedWithoutLagOrPixelsItDoesNotHave() {
+        val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 30))
+        val ns = 16_666_667L
+        val outs = ArrayList<LookaheadFramer.Output>()
+        val stepAt = 60
+        for (i in 0 until 180) {
+            val t = i * ns
+            val w = if (i < stepAt) 1920.0 else 960.0
+            f.addFrame(t, w, w * 9 / 16, Box(1920.0, 1080.0, w * 1.25, w * 1.25 * 9 / 16))
+            f.updateTrack(TrackPrediction.IDLE.copy(timestampNs = t))
+            f.emit()?.let { outs += it }
+        }
+        val widths = outs.associate { (it.timestampNs / ns).toInt() to it.crop.width }
+        // Eased: no single frame jumps by the whole step; it starts before the step (zero lag)
+        // but never wider than the frame's capture window (1.25 x its own crop).
+        val steps = (1 until 140).mapNotNull { k -> widths[k]?.let { a -> widths[k - 1]?.let { b -> abs(a - b) } } }
+        assertTrue("largest step ${steps.max()}", steps.max() < 960.0 * 0.2)
+        assertTrue("eases in before the step: ${widths[stepAt - 2]}", widths[stepAt - 2]!! < 1920.0)
+        for ((k, w) in widths) assertTrue("frame $k width $w", w <= (if (k < stepAt) 1920.0 else 960.0) * 1.25 + 1e-6)
+        assertEquals(960.0, widths[stepAt + 40]!!, 1e-6)
     }
 }

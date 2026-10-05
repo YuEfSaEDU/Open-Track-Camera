@@ -1,6 +1,9 @@
 package com.opentrack.tracking
 
 import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -8,6 +11,12 @@ import kotlin.math.pow
 data class StabilizerConfig(
     /** Frames of look-ahead: the output lags the camera by this much. 0 = causal. */
     val delayFrames: Int = 20,
+    /**
+     * Crop size (zoom) smoothing over the look-ahead window, Gaussian sigma in seconds (0 =
+     * off): zero lag, so a zoom eases in a little before the moment it was asked for, the
+     * way an operator anticipates.
+     */
+    val zoomSmoothS: Double = 0.2,
     /**
      * 0 = follow closely (cut-off ~2 Hz), 1 = very smooth (~0.2 Hz). Maps to the path
      * optimizer's derivative weights.
@@ -251,9 +260,10 @@ class LookaheadFramer(
         while (past.size > max((c.delayFrames * c.pastFactor).toInt(), MIN_PAST)) past.removeFirst()
         val pose = motion.poseAt(r.ts)
         val virtualRoll = if (c.rollStabilization) rolls[cur] else pose.roll
-        val limit = rotationLimit(r)
+        val (cw, ch) = smoothedSize(window, cur)
+        val limit = rotationLimit(r, cw, ch)
         val rotation = (pose.roll - virtualRoll).coerceIn(-limit, limit)
-        val ext = CropWindow.rotatedHalfExtents(r.cropW, r.cropH, rotation)
+        val ext = CropWindow.rotatedHalfExtents(cw, ch, rotation)
         var img = pose.toImage(Vec2(xs[cur] * scale, ys[cur] * scale), center)
         var x0 = ext.x
         var x1 = sourceWidth - ext.x
@@ -264,7 +274,31 @@ class LookaheadFramer(
             y0 = max(y0, cap.top + ext.y); y1 = min(y1, cap.bottom - ext.y)
         }
         img = Vec2(img.x.clampSafe(x0, x1), img.y.clampSafe(y0, y1))
-        return Output(r.ts, CropWindow(img.x, img.y, r.cropW, r.cropH, rotation), r.track)
+        return Output(r.ts, CropWindow(img.x, img.y, cw, ch, rotation), r.track)
+    }
+
+    /**
+     * Crop size of frame [cur] smoothed (in log scale) over the window; never larger than what
+     * the frame has pixels for (its capture window, the sensor).
+     */
+    private fun smoothedSize(window: List<Rec>, cur: Int): Pair<Double, Double> {
+        val r = window[cur]
+        val sigma = config.zoomSmoothS
+        if (sigma <= 0 || r.cropW <= 0) return r.cropW to r.cropH
+        var sum = 0.0
+        var wsum = 0.0
+        for (k in window.indices) {
+            val d = (window[k].ts - r.ts) * 1e-9 / sigma
+            if (abs(d) > 3) continue
+            val w = exp(-0.5 * d * d)
+            sum += w * ln(window[k].cropW / r.cropW)
+            wsum += w
+        }
+        var k = exp(sum / wsum)
+        val availW = min(sourceWidth.toDouble(), r.capture?.width ?: Double.MAX_VALUE)
+        val availH = min(sourceHeight.toDouble(), r.capture?.height ?: Double.MAX_VALUE)
+        k = min(k, max(1.0, min(availW / r.cropW, availH / r.cropH)))
+        return r.cropW * k to r.cropH * k
     }
 
     /**
@@ -304,10 +338,10 @@ class LookaheadFramer(
     }
 
     /** Largest crop rotation for this frame that still fits in the sensor and capture window. */
-    private fun rotationLimit(r: Rec): Double {
+    private fun rotationLimit(r: Rec, cropW: Double = r.cropW, cropH: Double = r.cropH): Double {
         val availW = min(sourceWidth.toDouble(), r.capture?.width ?: Double.MAX_VALUE)
         val availH = min(sourceHeight.toDouble(), r.capture?.height ?: Double.MAX_VALUE)
-        return CropWindow.maxFittingRotation(r.cropW, r.cropH, availW, availH, config.maxRoll)
+        return CropWindow.maxFittingRotation(cropW, cropH, availW, availH, config.maxRoll)
     }
 
     private companion object {

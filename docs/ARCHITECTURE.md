@@ -148,9 +148,17 @@ Kırpma zumu, kullanıcının belirlediği `[minZoom, maxZoom]` aralığında ke
 - **Güvenlik için genişleme**: takipçi yalnızca tahmin ediyorsa (COASTING) saniyede ~%45, hedef kırpma
   merkezinden yarı-boyutun %30'undan fazla uzaklaşırsa ayrıca genişler. Hedef yoksa en geniş sınıra
   döner; böylece yeniden yakalama kolaylaşır.
-- **Nefes almayı önleme**: log-uzayında çalışır, ±%12 ölü bölge ve histerezis vardır; zoom-in en fazla
-  0.45 ln/s, zoom-out 1.2 ln/s (hedefi kaçırmak gevşek kadrajdan daha kötüdür).
-- Lens zumu (telefoto geçişi) otomatik değildir: fiziksel kamera değişimi kayıtta sıçrama yapar.
+- **Nefes almayı önleme**: log-uzayında çalışır, ±%12 ölü bölge ve histerezis vardır.
+- **Yumuşak hareket (`SmoothZoom`)**: zoom hızı da ivmesi de sınırlı; zoom yavaşça hızlanır, hedefe
+  yaklaşırken tam o noktada duracak şekilde erkenden yavaşlar (aşmadan), sonu üstel yaklaşır.
+  Zoom-in en fazla 0.3 ln/s ve 0.35 ln/s², zoom-out 0.9 ln/s ve 1.2 ln/s² (hedefi kaçırmak gevşek
+  kadrajdan daha kötüdür); son yaklaşma 1.2 s / 0.6 s. Elle kırpma zoomu da aynı şekilde süzülür
+  (daha çabuk, 0.35 s), kaydırıcı sıçratmaz.
+- **İleriye bakan yumuşatma**: gecikmeli çıkışta kırpma boyutu look-ahead penceresinde log-uzayında
+  Gauss (σ 0.2 s) ile yumuşatılır (`StabilizerConfig.zoomSmoothS`); gecikmesiz olduğu için zoom
+  istendiği andan biraz önce başlar. Kare kendi kayıt penceresinden büyük olamaz.
+- Lens geçişi (hibrit zoom) kırpmayı değiştirmez: referans uzayda aynı kırpma, yalnız piksel kaynağı
+  değişir (aşağıda).
 - `nativeZoom` (4K→1080p için 2x) üstü dijital büyütmedir; arayüz bu değerleri ⚠ ile işaretler.
 
 ## Tespit ve takip

@@ -3,6 +3,7 @@ package com.opentrack.tracking
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.sin
 import kotlin.math.max
 import kotlin.math.min
@@ -110,7 +111,7 @@ class FramingController(
     var zoomConfig: ZoomConfig
         get() = autoZoom.config
         set(value) {
-            if (value.auto && !autoZoom.config.auto) autoZoom.reset(zoom)
+            if (value.auto && !autoZoom.config.auto) autoZoom.reset(currentZoom)
             autoZoom.config = value
         }
 
@@ -141,8 +142,14 @@ class FramingController(
         initialized = false
     }
 
+    /** The manual zoom as shown: eased towards [zoom] (a slider drag or tap glides, never jumps). */
+    private val manualEase = SmoothZoom()
+
+    /** The zoom the crop has right now (the eased manual zoom, or the auto zoom). */
+    val currentZoom: Double get() = if (zoomConfig.auto || manualEase.logZoom.isNaN()) zoom else exp(manualEase.logZoom)
+
     fun cropSize(): Pair<Double, Double> {
-        var w = sourceWidth / zoom.coerceAtLeast(1.0)
+        var w = sourceWidth / currentZoom.coerceAtLeast(1.0)
         var h = w / outputAspect
         if (h > sourceHeight) {
             h = sourceHeight.toDouble()
@@ -166,6 +173,13 @@ class FramingController(
         if (zoomConfig.auto) {
             val coastingS = if (track.state == TrackState.COASTING) ((timestampNs - track.lastMeasuredNs) * 1e-9).coerceAtLeast(0.0) else 0.0
             zoom = autoZoom.update(dtZoom, zoom, track, sourceWidth, outputAspect, coastingS, lastTargetOffset)
+            manualEase.reset(ln(zoom.coerceAtLeast(1.0)))
+        } else {
+            val c = zoomConfig
+            val goal = ln(zoom.coerceAtLeast(1.0))
+            if (!initialized || manualEase.logZoom.isNaN()) manualEase.reset(goal)
+            // The manual zoom eases quicker than the automatic one: the user is waiting for it.
+            manualEase.step(dtZoom, goal, MANUAL_RESPONSE_S, MANUAL_RESPONSE_S, c.maxZoomInRate * 3, c.maxZoomOutRate * 1.5, c.maxZoomInAccel * 4, c.maxZoomOutAccel * 1.5)
         }
         val (cw, ch) = cropSize()
         val pose = motion.poseAt(timestampNs)
@@ -280,6 +294,9 @@ class FramingController(
     }
 
     companion object {
+        /** Time constant of the manual zoom's final approach, seconds. */
+        const val MANUAL_RESPONSE_S = 0.35
+
         /** Largest zoom that keeps 1:1 (or better) pixel density for the given output width. */
         fun nativeZoom(sourceWidth: Int, outputWidth: Int): Double = max(1.0, sourceWidth.toDouble() / outputWidth)
     }
