@@ -90,4 +90,5 @@
     <string name="lens_calibrated">Lens kalibre edildi (%1$s): odak ×%2$.2f, distorsiyon %3$.2f (hata %4$.1f → %5$.1f px). Yeniden ölçmek için Lens düğmesine uzun bas.</string>
     <string name="lens_calibration_reset">Lens kalibrasyonu silindi: dokulu bir manzarada telefonu gezdirirken yeniden ölçülür.</string>
     <string name="lens_calibrating">kalibrasyon %1$s %%%2$d</string>
+    <string name="low_fps">%1$s burada yalnız %2$.0f fps veriyor (kamera bu hızı tutamıyor). Akıcı video için Akış düğmesinden desteklenen bir hız seç (ör. 4K30) ya da 4K60 için ana lensi kullan.</string>
 </resources>

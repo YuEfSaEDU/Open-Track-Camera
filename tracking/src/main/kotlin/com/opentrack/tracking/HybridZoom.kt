@@ -61,6 +61,8 @@ class HybridZoom(
     private val minHoldS: Double = 1.0,
     /** The crop must fit for this long before switching to a longer lens. */
     private val enterDelayS: Double = 0.3,
+    /** The level to start on (e.g. new [levels] for the same lenses while on one of them). */
+    startLevel: Int = 0,
 ) {
     /** Two levels: the reference (1) and a telephoto at [teleRatio]. */
     constructor(teleRatio: Double, width: Int, height: Int) : this(listOf(1.0, teleRatio), width, height)
@@ -73,7 +75,7 @@ class HybridZoom(
     val teleRatio: Double get() = levels.last()
 
     /** Index of the current level in [levels]. */
-    var level = 0
+    var level = startLevel.coerceIn(0, levels.size - 1)
         private set
 
     /** The zoom ratio to request (relative to the reference space). */

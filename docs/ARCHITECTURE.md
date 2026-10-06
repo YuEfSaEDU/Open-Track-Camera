@@ -455,6 +455,19 @@ gösterir. Bu yüzden her lens telefonda ölçülür:
   bulut) telefonu gezdirmek yeter. Lens düğmesine uzun basmak ölçümleri siler. Kamera raporunda
   ve kayıt günlüğünde (`lens` satırları) değerler var.
 
+İlk ölçüm (Honor 200 Pro, kamera 4, geniş açı `4/2`): 0.4x'te merkez odağı 1774 px, a = 0.31; lensin
+kendi iç parametresi 1760.8 px (akış genişliğinde) ile %0.7 uyumlu. Yani telefonun 0.4x dediği geniş
+açı gerçekte 0.67x ve belirgin fıçı distorsiyonlu; eski 0.4x varsayımı geniş açıda jiroskop
+düzeltmesini 1.7 kat yanlış ölçekliyordu. Bu yüzden ölçülmemiş lensler için önsel değer artık her
+fiziksel lensin kendi iç parametresi: geniş açı tüm sensörüyle en düşük oranda, ana lens 1x'te,
+telefoto oranın söylediği ölçekte (`MainActivity.physicalPriors`). Hibrit zoom basamakları, kırpma
+zoomu göstergeleri ve otomatik zoom sınırları da lens modellerinden gelen gerçek ölçekleri kullanır
+(geniş 0.67x, tele ~3x), oranları değil.
+
+Lens geçişinde parlaklık: enstantane önceliğinde ISO / süre, yeni lensin diyafram farkı kadar
+(1/f²) zoom isteğiyle aynı istekte değiştirilir; eski lensten hâlâ gelen karelerin ölçümü 1.5 s
+boyunca yok sayılır (`CameraController.updateForLens`).
+
 Sentetik doğrulama (`LensCalibratorTest`): HAL'ın 0.4x dediği (1114 px) ama gerçekte 1650 px merkez
 odaklı, a = 0.6 bir geniş açı %10 aykırı noktayla %1 / ±0.05 içinde bulunuyor; iğne delikli lens
 iğne delikli kalıyor.

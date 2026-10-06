@@ -135,6 +135,15 @@ class ShutterPriorityExposure(
     }
 
     /**
+     * The light reaching the sensor changes by [factor] (another lens: a different aperture):
+     * the total exposure moves by 1 / [factor] at once, so the picture keeps its brightness.
+     */
+    fun compensate(factor: Double) {
+        if (maxExposureNs <= 0 || factor <= 0) return
+        allocate(iso.toDouble() * exposureNs / factor)
+    }
+
+    /**
      * Changes the preferred shutter time (smart shutter) keeping the same total exposure;
      * returns true when ISO or time changed enough to be worth a new capture request.
      */

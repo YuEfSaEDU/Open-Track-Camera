@@ -146,6 +146,24 @@ class CameraController(
         handler.post { applySettings(newSettings) }
     }
 
+    /**
+     * Hybrid zoom moves to the lens [physicalId], which gets [lightFactor] times the light of the
+     * current one (aperture): in shutter priority ISO / time follow in the same request as the
+     * zoom ratio, and metering ignores frames of the old lens still on their way.
+     */
+    fun updateForLens(newSettings: CameraSettings, physicalId: String?, lightFactor: Double) {
+        handler.post {
+            if (manualActive && lightFactor > 0 && kotlin.math.abs(lightFactor - 1) > 0.02) ae?.compensate(lightFactor)
+            expectedLens = physicalId
+            expectedSinceNs = SystemClock.elapsedRealtimeNanos()
+            applySettings(newSettings)
+        }
+    }
+
+    /** The lens hybrid zoom asked for; metering frames of another lens are skipped (handler thread). */
+    private var expectedLens: String? = null
+    private var expectedSinceNs = 0L
+
     private fun applySettings(s: CameraSettings) {
         settings = s
         val cam = device ?: return
@@ -253,6 +271,13 @@ class CameraController(
         val mean = metering.mean
         if (manualActive) {
             val shot = shotSettings(timestampNs) ?: return@post
+            // A frame of the lens being left: it was right for that lens, not for the new one.
+            // (Only for a while: should the camera stay on another lens, metering must go on.)
+            val want = expectedLens?.takeIf { SystemClock.elapsedRealtimeNanos() - expectedSinceNs < 1_500_000_000L }
+            if (want != null) {
+                val lensOfFrame = physicalAt(timestampNs)
+                if (lensOfFrame != null && lensOfFrame != want) return@post
+            }
             val s = smart
             val moved = s != null && e.setPreferred(s.update(blurLimitNs))
             val changed = e.update(mean, shot.second, shot.first, metering.highlight)
