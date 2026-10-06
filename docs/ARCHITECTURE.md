@@ -390,11 +390,11 @@ perspektif ve rolling shutter buna göre çalışır.
 ### Hibrit zoom (`HybridZoom`, `ZoomMap`)
 
 Çoklu lens (mantıksal çok-kamera, Honor 200 Pro'da kamera 4: ana + geniş + tele) seçiliyken kamera
-zoom oranı kırpmaya göre bir lens merdiveninden seçilir: **geniş açı** (zoom aralığının alt ucu,
-0.4x), **ana** (1x), **tele** (tele lensin ana lense göre görüş açısı, 0.1 yukarı yuvarlanmış; ~2.6x).
-HAL oranla birlikte lensi değiştirir. Uçak yaklaşıp otomatik zoom açıldıkça geniş açıya, uzaklaştıkça
-ana lense, oradan teleye geçilir; kırpma her zaman onu gören en uzun lensin gerçek pikselleriyle
-dolar. Geçiş kesintisiz olsun diye:
+zoom oranı kırpmaya göre bir lens merdiveninden seçilir: **ana** (1x) ve **tele** (tele lensin ana
+lense göre görüş açısı, 0.1 yukarı yuvarlanmış; ~3x). HAL oranla birlikte lensi değiştirir. Uçak
+uzaklaştıkça teleye, yaklaştıkça ana lense geçilir; kırpma her zaman onu gören en uzun lensin gerçek
+pikselleriyle dolar. Geniş açı merdivende yok (v0.1.33): kendi ölçeği ve güçlü distorsiyonu
+geçişleri görünür kılıyordu; merdiven kodu (`HybridZoom`) istenirse daha çok basamağı destekler. Geçiş kesintisiz olsun diye:
 
 - Takip, kadraj, stabilizasyon, jiroskop ve perspektif **referans uzayda** çalışır: merdivenin en
   geniş basamağının görüntüsü (hibrit kapalıyken kamera zoom kaydırıcısınınki), `focalPx` da onun.

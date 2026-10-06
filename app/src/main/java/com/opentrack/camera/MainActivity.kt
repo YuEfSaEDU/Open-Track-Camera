@@ -704,9 +704,9 @@ class MainActivity : AppCompatActivity() {
     private var lensFactors: Map<String, Double> = emptyMap()
 
     /**
-     * The camera zoom ratios hybrid zoom moves between on the current multi-camera: its wide
-     * angle (the widest ratio), the main lens (1x) and its telephoto (the ratio its HAL
-     * switches to it, rounded up a little); null without at least two of them.
+     * The camera zoom ratios hybrid zoom moves between on the current multi-camera: the main
+     * lens (1x) and its telephoto (the ratio its HAL switches to it, rounded up a little); null
+     * without both.
      */
     private fun ladder(): List<Float>? {
         val l = lens?.takeIf { it.multi } ?: return null
@@ -759,7 +759,8 @@ class MainActivity : AppCompatActivity() {
         lensFactors = physical.associate { (it.physicalId ?: it.cameraId) to it.zoomFactor }
         physicalPriors = physicalPriors(physical, range.lower.toDouble())
         val out = ArrayList<Float>()
-        if (physical.any { it.zoomFactor < 0.85 } && range.lower < 0.95f) out += range.lower
+        // Main and telephoto only: the wide angle (its own scale and strong distortion) made the
+        // switches visible, and a close aircraft fits the main lens's crop anyway.
         out += 1f.coerceIn(range.lower, range.upper)
         physical.maxOfOrNull { it.zoomFactor }?.takeIf { it >= 1.3 }?.let { tele ->
             out += (kotlin.math.ceil(tele * 10 - 1e-6) / 10).toFloat().coerceIn(range.lower, range.upper)

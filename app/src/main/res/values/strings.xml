@@ -86,7 +86,7 @@
     <string name="recover_ten_bit">10-bit picture does not work on this phone: switched to HEVC (8-bit). %s</string>
     <string name="hybrid_on">Hybrid zoom: on (tele ≥%.1fx)</string>
     <string name="hybrid_off">Hybrid zoom: off</string>
-    <string name="hybrid_on_hint">Hybrid zoom: lenses %1$s, chosen by the crop: the wide angle when the aircraft is close, the telephoto from a crop zoom of %2$.1fx; tracking and stabilization carry on across switches.</string>
+    <string name="hybrid_on_hint">Hybrid zoom: lenses %1$s (main and telephoto), chosen by the crop: the telephoto from a crop zoom of %2$.1fx; tracking and stabilization carry on across switches.</string>
     <string name="hybrid_off_hint">Hybrid zoom off: the camera stays at the camera zoom slider.</string>
     <string name="hybrid_unavailable">Hybrid zoom needs the multi lens (Lens button) and the gyroscope.</string>
     <string name="lens_zoom_hybrid">Camera zoom: hybrid (automatic)</string>
