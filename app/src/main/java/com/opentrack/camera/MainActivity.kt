@@ -48,6 +48,8 @@ import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.FramingController
 import com.opentrack.tracking.GyroMotionModel
 import com.opentrack.tracking.HybridZoom
+import com.opentrack.tracking.LensCalibrator
+import com.opentrack.tracking.LensModel
 import com.opentrack.tracking.RollingShutter
 import com.opentrack.tracking.TargetTracker
 import com.opentrack.tracking.TrackState
@@ -222,6 +224,7 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.resolution).setOnClickListener { cycleResolution() }
         findViewById<Button>(R.id.lens).setOnClickListener { cycleLens() }
+        findViewById<Button>(R.id.lens).setOnLongClickListener { resetLensCalibration(); true }
         findViewById<Button>(R.id.hybrid).setOnClickListener {
             hybridOn = !hybridOn
             prefs.edit { putBoolean(PREF_HYBRID, hybridOn) }
@@ -369,6 +372,7 @@ class MainActivity : AppCompatActivity() {
             it.model = detectorModel
             it.outputWidth = outputWidth
             it.onSceneLuma = { m, ts, blur -> camera?.onSceneLuma(m, ts, blur) }
+            it.onLensCalibrated = { key, r -> onLensCalibrated(key, r) }
         }
         analysis = engine
 
@@ -421,6 +425,10 @@ class MainActivity : AppCompatActivity() {
         rp.baseZoom = settings.zoomRatio.toDouble()
         rp.zoomRequested(settings.zoomRatio.toDouble())
         rp.zoomAt = { ts -> camera?.zoomAt(ts) }
+        loadLensModels(p)
+        engine.calibratedLenses.addAll(lensModels.keys)
+        rp.lensKeyAt = { ts, z -> lensKeyFor(ts, z) }
+        rp.lensModel = { key -> lensModelFor(key) }
         rpRef = rp
         pipeline = rp
         applyHybrid(announce = false)
@@ -640,6 +648,8 @@ class MainActivity : AppCompatActivity() {
         val text = runCatching {
             (lastCrash?.let { "$it\n\n" } ?: "") + (detector?.report()?.let { "$it\n" } ?: "") + (lastProcessingError?.let { "İşleme hatası: $it\n" } ?: "") +
                 (lastCameraError?.let { "Son kamera hatası: $it\n" } ?: "") + ((lastRenderError ?: pipeline?.lastError)?.let { "Görüntü hatası: $it\n" } ?: "") +
+                "Lens kalibrasyonu: ${lensModels.entries.joinToString { (k, m) -> "$k odak %.0f px distorsiyon %.2f".format(java.util.Locale.ROOT, m.kappa, m.a) }.ifEmpty { "henüz yok" }}" +
+                    " (önsel odak %.0f px)\n".format(java.util.Locale.ROOT, profile?.focalPx ?: 0.0) +
                 "Codec: ${codec.name}, 10-bit GPU: ${if (pipeline?.tenBitActive == true) "evet" else "hayır"}, lens: ${lens?.key ?: "ana"}, kare geldi: ${if (framesSeen) "evet" else "hayır"}\n" + "Üretici deneyi: ${if (prefs.getBoolean(PREF_VENDOR, false)) "açık (" + VendorKeys.lastLog + ")" else "kapalı"}, " +
                 "ölçülen fps: ${"%.1f".format(lastMeasuredFps)}\n" + CameraReport.build(getSystemService(CameraManager::class.java), profile)
         }.getOrElse { it.stackTraceToString() }
@@ -755,12 +765,100 @@ class MainActivity : AppCompatActivity() {
     private fun applyReference() {
         val ref = refZoom()
         profile?.let { p ->
-            gyroModel?.focalPx = p.focalPx * ref
-            pipeline?.focalPx = p.focalPx * ref
+            // The reference lens's real center focal at that ratio (see LensModel).
+            val f = lensModelFor(lensKeyFor(null, ref)).focalAt(ref)
+            gyroModel?.focalPx = f
+            pipeline?.focalPx = f
         }
         pipeline?.baseZoom = ref
         pipeline?.zoomRequested(cameraZoom().toDouble())
         applyFraming()
+    }
+
+    /** Lens models measured on this phone (LensCalibrator), by lens key; the rest use [lensPrior]. */
+    private val lensModels = java.util.concurrent.ConcurrentHashMap<String, LensModel>()
+
+    /** Calibrations that came in while recording: applied when it stops (the mapping must not jump mid-video). */
+    private val pendingLensModels = HashMap<String, LensModel>()
+
+    /** Without a measurement: the zoom ratio is right and the lens a pinhole. */
+    private fun lensPrior(): LensModel = LensModel(profile?.focalPx ?: 1.0)
+
+    private fun lensModelFor(key: String): LensModel = lensModels[key] ?: lensPrior()
+
+    /**
+     * The physical lens a frame came from: the one the camera reports for it ([ts]), else, on a
+     * multi-camera, the one its zoom ratio selects (the wide angle below 1x, the telephoto from
+     * its ratio); "camera id/physical id".
+     */
+    private fun lensKeyFor(ts: Long?, zoom: Double): String {
+        val p = profile ?: return "-"
+        if (lens?.multi != true) return p.physicalCameraId?.let { "${p.cameraId}/$it" } ?: p.cameraId
+        val reported = ts?.let { camera?.physicalAt(it) }
+        val id = reported ?: run {
+            val factors = lensFactors
+            val tele = ladder()?.last()?.toDouble() ?: Double.MAX_VALUE
+            when {
+                zoom < 0.95 -> factors.minByOrNull { it.value }?.key
+                zoom >= tele - 0.05 && tele > 1.3 -> factors.maxByOrNull { it.value }?.key
+                else -> factors.minByOrNull { kotlin.math.abs(it.value - 1.0) }?.key
+            } ?: "z%.1f".format(java.util.Locale.ROOT, zoom)
+        }
+        return "${p.cameraId}/$id"
+    }
+
+    /** Loads this phone's lens calibrations (stored per stream width). */
+    private fun loadLensModels(p: CameraProfile) {
+        lensModels.clear()
+        for ((k, v) in prefs.all) {
+            if (!k.startsWith(PREF_LENS_CAL)) continue
+            val parts = (v as? String)?.split(";") ?: continue
+            val kw = parts.getOrNull(0)?.toDoubleOrNull() ?: continue
+            val a = parts.getOrNull(1)?.toDoubleOrNull() ?: 0.0
+            lensModels[k.removePrefix(PREF_LENS_CAL)] = LensModel(kw * p.sourceSize.width, a)
+        }
+    }
+
+    /** A lens calibration converged (analysis): store it, use it (after the recording, if one runs). */
+    private fun onLensCalibrated(key: String, r: LensCalibrator.Result) = runOnUiThread {
+        val p = profile ?: return@runOnUiThread
+        prefs.edit { putString(PREF_LENS_CAL + key, "${r.model.kappa / p.sourceSize.width};${r.model.a}") }
+        val before = lensModelFor(key)
+        if (recorder?.isRecording == true) pendingLensModels[key] = r.model else applyLensModel(key, r.model)
+        Toast.makeText(
+            this,
+            getString(R.string.lens_calibrated, lensNameFor(key), r.model.kappa / before.kappa, r.model.a, r.priorRmsPx, r.rmsPx),
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+
+    private fun applyLensModel(key: String, m: LensModel) {
+        lensModels[key] = m
+        // The reference lens: the gyroscope's focal length changes with it.
+        if (key == lensKeyFor(null, refZoom())) applyReference()
+    }
+
+    /** "GENİŞ"/"ANA"/"TELE" for a lens key. */
+    private fun lensNameFor(key: String): String {
+        val id = key.substringAfter('/', key)
+        val factor = lensFactors[id] ?: lens?.zoomFactor ?: 1.0
+        return getString(
+            when {
+                factor < 0.85 -> R.string.lens_wide
+                factor > 1.3 -> R.string.lens_tele
+                else -> R.string.lens_main
+            },
+        ).uppercase(java.util.Locale.getDefault())
+    }
+
+    /** Forgets this phone's lens calibrations (long press on the lens button); they are measured again. */
+    private fun resetLensCalibration() {
+        prefs.edit { prefs.all.keys.filter { it.startsWith(PREF_LENS_CAL) }.forEach { remove(it) } }
+        lensModels.clear()
+        pendingLensModels.clear()
+        analysis?.calibratedLenses?.clear()
+        applyReference()
+        Toast.makeText(this, R.string.lens_calibration_reset, Toast.LENGTH_LONG).show()
     }
 
     /** Crop zoom settings (vs the main lens) → the framing, which works in the reference space. */
@@ -925,6 +1023,8 @@ class MainActivity : AppCompatActivity() {
     private fun stopRecording(blocking: Boolean) {
         val rec = recorder ?: return
         recorder = null
+        for ((k, m) in pendingLensModels) applyLensModel(k, m)
+        pendingLensModels.clear()
         pipeline?.detachEncoder()
         recordButton.isActivated = false
         val log = telemetry
@@ -1006,7 +1106,11 @@ class MainActivity : AppCompatActivity() {
             },
         ).uppercase(java.util.Locale.getDefault())
         val id = if (lens?.multi == true) camera?.activePhysicalId?.let { " ($it)" } ?: "" else ""
-        return "$kind ${"%.1f".format(java.util.Locale.ROOT, zoom)}x$id"
+        // Lens calibration under way: pan over textured scenery (buildings, trees, clouds).
+        val cal = analysis?.calibrationProgress?.takeIf { (k, _) -> !lensModels.containsKey(k) }?.let { (k, f) ->
+            " · " + getString(R.string.lens_calibrating, lensNameFor(k), (f * 100).roundToInt())
+        } ?: ""
+        return "$kind ${"%.1f".format(java.util.Locale.ROOT, zoom)}x$id$cal"
     }
 
     private fun showStatus(s: OverlayState) {
@@ -1097,6 +1201,8 @@ class MainActivity : AppCompatActivity() {
         const val PREF_TARGET = "targetClasses"
         const val PREF_LENS = "lens"
         const val PREF_HYBRID = "hybridZoom"
+        /** Lens calibrations: key + lens key → "center focal / stream width;distortion". */
+        const val PREF_LENS_CAL = "lensCal:"
         /** Crop zoom sliders: up to this (vs the main lens). */
         const val ZOOM_MAX = 10.0
         const val PREF_COCO = "preferCoco"

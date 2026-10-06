@@ -429,6 +429,36 @@ pozlama farkı geçişte görünebilir; ölçmek için kayıt günlüğünde `ca
 `live.z` ve `set.ladder` / `refZoom` var. Takipçinin rolling shutter modeli ve piksel eşikleri
 (`TrackerConfig.forSource`) referans uzayda; geniş açı referansında uzak hedef için daha temkinli.
 
+### Lens kalibrasyonu (`LensModel`, `LensCalibrator`)
+
+Telefon üçüncü parti uygulamalara lens distorsiyonu vermiyor (`LENS_DISTORTION` hep sıfır, HAL düzeltmesi
+yok) ve çoklu kameranın zoom oranı her lensin gerçek ölçeğiyle örtüşmeyebilir: Honor 200 Pro'da geniş
+açının iç parametresi (fx 1760.8) ana lense göre ~0.62x verirken zoom aralığı 0.4x'ten başlıyor. Yanlış
+ölçek jiroskop düzeltmesini, düzeltilmemiş distorsiyon kırpmanın kare içinde kaymasını "bükülme" olarak
+gösterir. Bu yüzden her lens telefonda ölçülür:
+
+- Model: merkez odağı `kappa × zoom` (akış px) ve tek parametreli radyal distorsiyon
+  `r_d = atan(a·r_u)/a` (a = 0 iğne delikli, 1 eşit uzaklıklı balıkgözü; arası geniş açının fıçı
+  distorsiyonu, her a için monoton).
+- Ölçüm: jiroskoplu çekimde her 4 karede bir çift karede arka plan noktaları (Shi-Tomasi + piramidal
+  LK, hedef hariç) eşlenir; noktaların lensin kendi piksellerindeki konumu ve iki kare arasındaki
+  dönüş (jiroskop: eksen eğimi + roll) bir örnek olur. Dönüşün gerçek 3B ışın dönüşü olarak modeli
+  (`kappa`, `a`) ızgara aramasıyla, Huber kaybıyla (kendi hareket eden cisimler önemsiz) uydurulur
+  (`LensCalibrator.fit`, arka plan thread'i). 1500 ve 3000 örnekteki iki uyum anlaşınca lens kalibre
+  sayılır, değer saklanır (akış genişliğine oranla, lens anahtarı `kamera/fiziksel`), uyarı gösterilir.
+  Kayıt sırasında gelirse kayıt bitince uygulanır.
+- Kullanım: kare referans uzaya gerçek merkez ölçeğiyle (`kappa·z / f_ref`) yerleşir, jiroskop ve
+  perspektif odağı referans lensin gerçek odağıdır, kamera dokusu tüm shader'larda düzeltilmiş
+  (iğne delikli) olarak örneklenir (`FrameRenderer.setLens`, `lensPoint`); önizleme, analiz, kayıt
+  hepsi düz çizgili görüntüyü görür.
+- Durum satırı ölçüm sürerken `kalibrasyon GENİŞ %40` gösterir; dokulu bir manzarada (bina, ağaç,
+  bulut) telefonu gezdirmek yeter. Lens düğmesine uzun basmak ölçümleri siler. Kamera raporunda
+  ve kayıt günlüğünde (`lens` satırları) değerler var.
+
+Sentetik doğrulama (`LensCalibratorTest`): HAL'ın 0.4x dediği (1114 px) ama gerçekte 1650 px merkez
+odaklı, a = 0.6 bir geniş açı %10 aykırı noktayla %1 / ±0.05 içinde bulunuyor; iğne delikli lens
+iğne delikli kalıyor.
+
 ## Gerçek video testleri
 
 `tools/video_bench/run_bench.py` ile açık lisanslı 6 hava gösterisi videosu (Wikimedia Commons ve

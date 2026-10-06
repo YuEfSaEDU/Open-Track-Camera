@@ -17,7 +17,9 @@ import com.opentrack.tracking.Box
 import com.opentrack.tracking.CameraMotion
 import com.opentrack.tracking.CropWindow
 import com.opentrack.tracking.FramingController
+import com.opentrack.tracking.FrameLens
 import com.opentrack.tracking.HybridZoom
+import com.opentrack.tracking.LensModel
 import com.opentrack.tracking.LookaheadFramer
 import com.opentrack.tracking.PerspectiveView
 import com.opentrack.tracking.RollingShutter
@@ -80,6 +82,16 @@ class RenderPipeline(
 
     /** Picks the zoom ratio (lens) of a multi-camera from the crop, relative to [baseZoom]; null = fixed zoom. */
     @Volatile var hybrid: HybridZoom? = null
+
+    /** Which physical lens took the frame of (timestamp, zoom ratio): the key of its [lensModel]. */
+    @Volatile var lensKeyAt: ((Long, Double) -> String)? = null
+
+    /**
+     * The lens's real center focal and distortion (see LensModel), measured on the phone; null
+     * = trust the zoom ratio, no distortion. Frames are mapped to the reference space with it
+     * and drawn rectified, so lines stay straight when stabilization moves the crop.
+     */
+    @Volatile var lensModel: ((String) -> LensModel?)? = null
 
     /** The zoom ratio last asked of the camera (by hybrid zoom or the user). */
     @Volatile var requestedZoom = 1.0
@@ -303,7 +315,13 @@ class RenderPipeline(
         }
 
         // 0. Where this frame sits in the reference space (its own zoom ratio / lens).
-        val map = ZoomMap(frameZoom(ts) / baseZoom, srcW, srcH)
+        val z = frameZoom(ts)
+        val lensKey = lensKeyAt?.invoke(ts, z)
+        val model = lensKey?.let { lensModel?.invoke(it) }
+        val f = focalPx
+        val map = ZoomMap(if (model != null && f > 0) model.focalAt(z) / f else z / baseZoom, srcW, srcH)
+        renderer.setLens(model?.a ?: 0.0, (model?.focalAt(z) ?: srcW.toDouble()) / srcW, srcW.toDouble() / srcH)
+        val frameLens = if (lensKey != null && model != null && f > 0) FrameLens(lensKey, z, map.zoom, model, f) else null
         frameMap = map
         val visible = if (map.zoom > 1.0) map.visible else null
         val whole = map.toStream(Box(srcW / 2.0, srcH / 2.0, srcW.toDouble(), srcH.toDouble()))
@@ -318,7 +336,7 @@ class RenderPipeline(
             texture, texMatrix, analysis.width, analysis.height,
             (analysed.left / srcW).toFloat(), (analysed.top / srcH).toFloat(), (analysed.width / srcW).toFloat(), (analysed.height / srcH).toFloat(),
         )
-        analysis.submitLuma(lumaTarget.read(), ts, visible, window)
+        analysis.submitLuma(lumaTarget.read(), ts, visible, window, frameLens)
         if (analysis.wantsNeuralFrame()) {
             // The whole frame, or a zoomed region around the target (see DetectionPlanner).
             val region = analysis.neuralRegion(ts, visible)

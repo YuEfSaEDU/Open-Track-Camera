@@ -23,6 +23,19 @@ class FrameRenderer {
 
     var displayRotationQuarterTurns: Int = 1
 
+    /**
+     * The lens of the frames drawn next (see LensModel): distortion a, center focal / image
+     * width, image width / height. a = 0: drawn as is. With a > 0 the frame is drawn rectified
+     * (straight lines straight), in "image" coordinates of a pinhole lens with the same center.
+     */
+    private val lens = floatArrayOf(0f, 1f, 16f / 9f)
+
+    fun setLens(a: Double, focalOverWidth: Double, aspect: Double) {
+        lens[0] = a.toFloat()
+        lens[1] = focalOverWidth.toFloat()
+        lens[2] = aspect.toFloat()
+    }
+
     fun createOesTexture(): Int {
         val t = IntArray(1)
         GLES20.glGenTextures(1, t, 0)
@@ -100,6 +113,7 @@ class FrameRenderer {
         val uPx = GLES20.glGetUniformLocation(id, "uPx")
         val uSrc = GLES20.glGetUniformLocation(id, "uSrc")
         val uTex = GLES20.glGetUniformLocation(id, "sTex")
+        val uLens = GLES20.glGetUniformLocation(id, "uLens")
 
         fun draw(texture: Int, m: FloatArray, l: Float, t: Float, w: Float, h: Float, flip: Boolean, px: Float, py: Float, srcX: Float = 0f, srcY: Float = 0f) {
             GLES20.glUseProgram(id)
@@ -113,6 +127,7 @@ class FrameRenderer {
             GLES20.glUniform1i(uRotation, displayRotationQuarterTurns and 3)
             if (uPx >= 0) GLES20.glUniform2f(uPx, px, py)
             if (uSrc >= 0) GLES20.glUniform2f(uSrc, srcX, srcY)
+            if (uLens >= 0) GLES20.glUniform3f(uLens, lens[0], lens[1], lens[2])
             GLES20.glEnableVertexAttribArray(aPos)
             GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -141,12 +156,23 @@ class FrameRenderer {
             uniform mat4 uTexMatrix;
             uniform int uRotation;
             varying highp vec2 vImg;
+            // Lens distortion (LensModel): x = a, y = center focal / width, z = width / height.
+            uniform vec3 uLens;
+            // Rectified (pinhole) image point → where the lens put it: r_d = atan(a r_u) / a.
+            vec2 lensPoint(vec2 img) {
+                if (uLens.x <= 0.0) return img;
+                vec2 d = (img - 0.5) * vec2(1.0, 1.0 / uLens.z) / uLens.y;
+                float r = length(d) * uLens.x;
+                return r < 1e-5 ? img : 0.5 + (img - 0.5) * (atan(r) / r);
+            }
             // 1 inside the camera image, 0 outside: regions given in a zoomed-out reference space
             // (a telephoto frame drawn where the main lens would see it) are black around it.
             float inImage(vec2 img) {
-                return step(0.0, img.x) * step(img.x, 1.0) * step(0.0, img.y) * step(img.y, 1.0);
+                vec2 p = lensPoint(img);
+                return step(0.0, p.x) * step(p.x, 1.0) * step(0.0, p.y) * step(p.y, 1.0);
             }
             vec2 imgToTex(vec2 img) {
+                img = lensPoint(img);
                 vec2 n;
                 if (uRotation == 1) n = vec2(1.0 - img.y, img.x);
                 else if (uRotation == 3) n = vec2(img.y, 1.0 - img.x);

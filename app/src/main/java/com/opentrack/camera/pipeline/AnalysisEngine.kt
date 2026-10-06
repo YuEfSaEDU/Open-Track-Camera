@@ -25,6 +25,9 @@ import com.opentrack.tracking.TrackState
 import com.opentrack.tracking.Vec2
 import com.opentrack.tracking.VisualMotionEstimator
 import com.opentrack.tracking.Box
+import com.opentrack.tracking.FrameLens
+import com.opentrack.tracking.LensCalibrator
+import com.opentrack.tracking.calibrationSamples
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -75,6 +78,27 @@ class AnalysisEngine(
         private set
     @Volatile var lastNeuralMs = 0.0
         private set
+
+    /**
+     * A lens calibration converged (see [LensCalibrator]): lens key, result. Analysis thread.
+     * Only with the gyroscope (the calibration compares its rotation with the image motion).
+     */
+    @Volatile var onLensCalibrated: ((String, LensCalibrator.Result) -> Unit)? = null
+
+    /** Lenses already calibrated (or not to calibrate): no more samples for them. */
+    val calibratedLenses: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet())
+
+    /** Lens being calibrated and how far (0..1, two agreeing fits needed), for the status line. */
+    @Volatile var calibrationProgress: Pair<String, Double>? = null
+        private set
+
+    private val calibrators = HashMap<String, LensCalibrator>()
+    private val lastFits = HashMap<String, LensCalibrator.Result>()
+    private var calPrev: LumaFrame? = null
+    private val calFlow = VisualMotionEstimator()
+    private val calExecutor = Executors.newSingleThreadExecutor { Thread(it, "lens-calibration").apply { priority = Thread.MIN_PRIORITY } }
+    private val calBusy = AtomicBoolean(false)
+    private val calFitSize = HashMap<String, Int>()
 
     private val skyBlob = SkyBlobDetector()
     private val sourceCenter = Vec2(width * scale / 2, height * scale / 2)
@@ -149,11 +173,11 @@ class AnalysisEngine(
      * [window]: the part of the reference frame the image shows (null = all of it): a
      * telephoto frame is analysed at its own resolution (see [LumaFrame.windowed]).
      */
-    fun submitLuma(luma: ByteBuffer, timestampNs: Long, visible: Box? = null, window: Box? = null) {
+    fun submitLuma(luma: ByteBuffer, timestampNs: Long, visible: Box? = null, window: Box? = null, lens: FrameLens? = null) {
         val buf = freeBuffers.poll() ?: return
         luma.get(buf, 0, width * height)
-        val frame = if (window == null) LumaFrame(width, height, buf, timestampNs, scale, visible)
-        else LumaFrame(width, height, buf, timestampNs, window.width / width, visible, window.left, window.top, sourceW, sourceH)
+        val frame = if (window == null) LumaFrame(width, height, buf, timestampNs, scale, visible, lens = lens)
+        else LumaFrame(width, height, buf, timestampNs, window.width / width, visible, window.left, window.top, sourceW, sourceH, lens)
         handler.post { process(frame) }
     }
 
@@ -180,6 +204,7 @@ class AnalysisEngine(
             val meterNow = frameIndex % 6 == 0L
             frameIndex++
             visualMotion?.process(frame, lastTargetBox)
+            if (visualMotion == null) calibrate(frame)
             val p = tracker.process(frame, detections, runs)
             if (meterNow) meter(frame, p)
             // Mask the aircraft from the next motion estimate, so its own motion is not taken for shake.
@@ -191,6 +216,70 @@ class AnalysisEngine(
             telemetry?.let { logTrack(it, frame.timestampNs, p, detections) }
         } finally {
             freeBuffers.offer(frame.data)
+        }
+    }
+
+    /**
+     * Lens calibration: every few frames, background features matched into the next frame
+     * against the gyro's rotation (see [LensCalibrator]); fits run on their own thread.
+     */
+    private fun calibrate(frame: LumaFrame) {
+        val lens = frame.lens ?: return
+        if (lens.key in calibratedLenses) { calPrev = null; return }
+        val prev = calPrev
+        calPrev = null
+        if (frameIndex % CAL_EVERY == 0L) {
+            // Kept for the next frame (the buffer goes back to the pool).
+            calPrev = LumaFrame(frame.width, frame.height, frame.data.copyOf(), frame.timestampNs, frame.scale, frame.visible, frame.originX, frame.originY, frame.sourceWidth, frame.sourceHeight, lens)
+            return
+        }
+        if (prev == null || prev.lens?.sameAs(lens) != true || prev.scale != frame.scale || prev.originX != frame.originX ||
+            frame.timestampNs - prev.timestampNs > 60_000_000L) return
+        val pa = motion.poseAt(prev.timestampNs)
+        val pb = motion.poseAt(frame.timestampNs)
+        val guess = (pb.offset - pa.offset) / frame.scale
+        // A still camera says nothing about the lens's scale.
+        if (guess.length() < 0.8) return
+        val pairs = calFlow.correspondences(prev, frame, lastTargetBox, guess)
+        if (pairs.size < 20) return
+        var c = calibrators[lens.key]
+        if (c == null || c.prior != lens.model) {
+            // (A new model in use: its samples start over.)
+            c = LensCalibrator(lens.model).also { calibrators[lens.key] = it }
+            calFitSize.remove(lens.key)
+            lastFits.remove(lens.key)
+        }
+        for (s in calibrationSamples(prev, frame, pairs, motion)) c.add(s)
+        calibrationProgress = lens.key to minOf(0.99, c.size / (2.0 * c.minSamples))
+        val last = calFitSize[lens.key] ?: 0
+        if (c.size >= c.minSamples && (last == 0 || c.size >= last + 1500 || c.size == 6000 && frameIndex % 300 == 0L) && calBusy.compareAndSet(false, true)) {
+            calFitSize[lens.key] = c.size
+            val data = c.snapshot()
+            val key = lens.key
+            calExecutor.execute {
+                try {
+                    val r = c.fit(data) ?: return@execute
+                    handler.post { onFit(key, r) }
+                } catch (e: Exception) {
+                    Log.e(TAG, "lens calibration failed", e)
+                } finally {
+                    calBusy.set(false)
+                }
+            }
+        }
+    }
+
+    /** Two fits in a row that agree: the lens is calibrated. */
+    private fun onFit(key: String, r: LensCalibrator.Result) {
+        telemetry?.line("lens")?.s("key", key)?.n("kappa", r.model.kappa, 1)?.n("a", r.model.a, 3)?.n("rms", r.rmsPx, 2)?.n("priorRms", r.priorRmsPx, 2)?.i("n", r.samples)?.send()
+        val prev = lastFits[key]
+        lastFits[key] = r
+        if (prev == null) return
+        val agree = kotlin.math.abs(prev.model.kappa / r.model.kappa - 1) < 0.015 && kotlin.math.abs(prev.model.a - r.model.a) < 0.05
+        if (agree && key !in calibratedLenses) {
+            calibratedLenses += key
+            calibrationProgress = null
+            onLensCalibrated?.invoke(key, r)
         }
     }
 
@@ -252,10 +341,13 @@ class AnalysisEngine(
         thread.quitSafely()
         // The detector belongs to the activity (shared with gallery processing): not closed here.
         detectorExecutor.shutdown()
+        calExecutor.shutdown()
     }
 
     companion object {
         private const val TAG = "AnalysisEngine"
+        /** Lens calibration: one frame pair out of this many frames. */
+        private const val CAL_EVERY = 4L
         /** Analysis px a sky blob must keep from a telephoto frame's edge. */
         private const val EDGE_MARGIN_PX = 2.0
         /**

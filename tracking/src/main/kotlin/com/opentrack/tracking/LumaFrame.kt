@@ -27,6 +27,8 @@ class LumaFrame(
     /** Size of the whole source (reference) frame, px; the image may cover only part of it. */
     val sourceWidth: Double = width * scale,
     val sourceHeight: Double = height * scale,
+    /** Which lens took the frame and how it maps to the reference space (lens calibration). */
+    val lens: FrameLens? = null,
 ) {
     init {
         require(data.size >= width * height) { "buffer too small: ${data.size} < ${width * height}" }

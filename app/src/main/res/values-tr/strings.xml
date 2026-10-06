@@ -87,4 +87,7 @@
     <string name="hybrid_off_hint">Hibrit zoom kapalı: kamera, kamera zoom kaydırıcısındaki oranda kalır.</string>
     <string name="hybrid_unavailable">Hibrit zoom için çoklu lens (Lens düğmesi) ve jiroskop gerekir.</string>
     <string name="lens_zoom_hybrid">Kamera zoom: hibrit (otomatik)</string>
+    <string name="lens_calibrated">Lens kalibre edildi (%1$s): odak ×%2$.2f, distorsiyon %3$.2f (hata %4$.1f → %5$.1f px). Yeniden ölçmek için Lens düğmesine uzun bas.</string>
+    <string name="lens_calibration_reset">Lens kalibrasyonu silindi: dokulu bir manzarada telefonu gezdirirken yeniden ölçülür.</string>
+    <string name="lens_calibrating">kalibrasyon %1$s %%%2$d</string>
 </resources>

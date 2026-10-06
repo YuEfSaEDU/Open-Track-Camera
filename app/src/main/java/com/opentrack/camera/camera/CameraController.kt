@@ -287,6 +287,7 @@ class CameraController(
     // Zoom ratio of recent frames by sensor timestamp (the render thread maps each frame by it).
     private val zoomTs = LongArray(SHOT_HISTORY)
     private val zoomRatio = FloatArray(SHOT_HISTORY)
+    private val zoomPhysical = arrayOfNulls<String>(SHOT_HISTORY)
     private var zoomNext = 0
 
     /** The physical lens of a multi-camera the latest frame came from (null if not reported). */
@@ -296,6 +297,12 @@ class CameraController(
     /** The zoom ratio the frame of [timestampNs] was taken with, once its capture result is in. */
     fun zoomAt(timestampNs: Long): Double? = synchronized(shotLock) {
         for (k in 0 until SHOT_HISTORY) if (zoomTs[k] == timestampNs && zoomRatio[k] > 0f) return zoomRatio[k].toDouble()
+        null
+    }
+
+    /** The physical lens (multi-camera) the frame of [timestampNs] came from, if reported. */
+    fun physicalAt(timestampNs: Long): String? = synchronized(shotLock) {
+        for (k in 0 until SHOT_HISTORY) if (zoomTs[k] == timestampNs) return zoomPhysical[k]
         null
     }
 
@@ -328,6 +335,7 @@ class CameraController(
                 zoomTs[zoomNext] = ts
                 // The ratio the frame was taken with; a HAL that does not report it did what was asked.
                 zoomRatio[zoomNext] = result.get(CaptureResult.CONTROL_ZOOM_RATIO) ?: result.request.get(CaptureRequest.CONTROL_ZOOM_RATIO) ?: 1f
+                zoomPhysical[zoomNext] = result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)
                 zoomNext = (zoomNext + 1) % SHOT_HISTORY
             }
             result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { activePhysicalId = it }

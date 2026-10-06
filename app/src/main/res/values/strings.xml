@@ -90,4 +90,7 @@
     <string name="hybrid_off_hint">Hybrid zoom off: the camera stays at the camera zoom slider.</string>
     <string name="hybrid_unavailable">Hybrid zoom needs the multi lens (Lens button) and the gyroscope.</string>
     <string name="lens_zoom_hybrid">Camera zoom: hybrid (automatic)</string>
+    <string name="lens_calibrated">Lens calibrated (%1$s): focal x%2$.2f, distortion %3$.2f (error %4$.1f → %5$.1f px). Long press the lens button to measure again.</string>
+    <string name="lens_calibration_reset">Lens calibration cleared: measured again while you pan over textured scenery.</string>
+    <string name="lens_calibrating">calibrating %1$s %2$d%%</string>
 </resources>
