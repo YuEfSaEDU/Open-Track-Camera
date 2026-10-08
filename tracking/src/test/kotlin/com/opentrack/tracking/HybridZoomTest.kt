@@ -42,62 +42,56 @@ class HybridZoomTest {
     private fun crop(zoom: Double, cx: Double = w / 2.0, cy: Double = h / 2.0) = CropWindow(cx, cy, w / zoom, h / zoom)
 
     @Test
-    fun switchesToTheTelephotoOnlyWhenTheCropFitsWithRoom() {
-        val z = HybridZoom(3.0, w, h)
+    fun zoomsTheMainLensGraduallyThenMovesToTheTelephoto() {
+        val z = HybridZoom(w, h, tele = 3.0, maxRatio = 6.0)
         var t = 0L
-        fun step(c: CropWindow, s: Double = 0.1): Double { t += (s * 1e9).toLong(); return z.update(t, c) }
-        // 3x crop: exactly the telephoto's view, no room: stays on the main lens.
-        repeat(20) { assertEquals(1.0, step(crop(3.0)), 0.0) }
-        // 4.5x crop centered: fits with 1.35x room (needs > 4.05x); after the delay → telephoto.
-        assertEquals(1.0, step(crop(4.5)), 0.0)
-        repeat(4) { step(crop(4.5)) }
-        assertEquals(3.0, z.ratio, 0.0)
-        // Zooming out to 3.6x: still fits with the exit room (1.1 → needs > 3.3x): stays.
-        repeat(5) { assertEquals(3.0, step(crop(3.6)), 0.0) }
-        // 3.2x: no longer fits → back to the main lens at once.
-        assertEquals(1.0, step(crop(3.2)), 0.0)
+        fun step(zoom: Double, n: Int = 1): Double { var r = 0.0; repeat(n) { t += 100_000_000L; r = z.update(t, crop(zoom)) }; return r }
+        // Wide crop: no camera zoom.
+        assertEquals(1.0, step(1.2), 0.0)
+        // The camera zoom follows the crop on the main lens: crop / headroom, in 1% steps...
+        assertEquals(2.0 / 1.35, step(2.0), 0.01)
+        assertEquals(3.0 / 1.35, step(3.0), 0.02)
+        assertTrue(!z.onTele)
+        // ...held below the telephoto's ratio (no hovering at the HAL's switch point)...
+        assertEquals(2.7, step(3.9, 5), 0.03)
+        assertTrue(!z.onTele)
+        // ...until the crop fits the telephoto with room (4.05x): then the telephoto, after a delay.
+        step(4.5, 5)
+        assertTrue(z.onTele)
+        assertEquals(4.5 / 1.35, z.ratio, 0.04)
+        // On the telephoto the ratio never drops below its own.
+        assertEquals(3.0, step(3.6, 5), 0.01)
+        // Out of its view (exit room 1.1: below 3.3x) → main lens at once.
+        assertEquals(3.2 / 1.35, step(3.2), 0.03)
+        assertTrue(!z.onTele)
     }
 
     @Test
-    fun anOffCenterCropKeepsTheMainLensAndAQuickFlipIsHeldOff() {
-        val z = HybridZoom(3.0, w, h)
+    fun anOffCenterCropNeedsLessCameraZoom() {
+        val z = HybridZoom(w, h, tele = 3.0, maxRatio = 6.0)
+        // The same 5x crop near the frame's edge: a centered camera crop must still contain it.
+        val centered = z.coverRatio(crop(5.0), 1.35)
+        val offCenter = z.coverRatio(crop(5.0, cx = 3000.0), 1.35)
+        assertEquals(5.0 / 1.35, centered, 1e-9)
+        assertTrue("$offCenter", offCenter < 2.0)
+        var t = 0L
+        repeat(30) { t += 100_000_000L; z.update(t, crop(5.0, cx = 3000.0)) }
+        assertTrue(!z.onTele)
+    }
+
+    @Test
+    fun aQuickFlipBackToTheTelephotoIsHeldOff() {
+        val z = HybridZoom(w, h, tele = 3.0, maxRatio = 6.0)
         var t = 0L
         fun step(c: CropWindow) { t += 100_000_000L; z.update(t, c) }
-        // 5x crop but far off-center (the aircraft near the frame edge): the telephoto cannot see it.
-        repeat(20) { step(crop(5.0, cx = 3000.0)) }
-        assertEquals(1.0, z.ratio, 0.0)
-        // Centered: switches.
         repeat(5) { step(crop(5.0)) }
-        assertEquals(3.0, z.ratio, 0.0)
-        // Leaves (drifts off) right away...
+        assertTrue(z.onTele)
         step(crop(5.0, cx = 3000.0))
-        assertEquals(1.0, z.ratio, 0.0)
-        // ...and back only after the hold time (1 s), not on the next frames.
+        assertTrue(!z.onTele)
         repeat(5) { step(crop(5.0)) }
-        assertEquals(1.0, z.ratio, 0.0)
+        assertTrue("held off", !z.onTele)
         repeat(10) { step(crop(5.0)) }
-        assertEquals(3.0, z.ratio, 0.0)
-    }
-
-    @Test
-    fun climbsAndDescendsTheLensLadder() {
-        // Reference: the wide angle (0.4x); main at 1x = level 2.5, telephoto 2.6x = level 6.5.
-        val z = HybridZoom(listOf(1.0, 2.5, 6.5), w, h)
-        var t = 0L
-        fun run(c: CropWindow, n: Int = 15) = repeat(n) { t += 100_000_000L; z.update(t, c) }
-        // Aircraft close: a wide crop stays on the wide angle.
-        run(crop(1.5))
-        assertEquals(0, z.level)
-        // Farther: the crop fits the main lens with room (> 3.375x) → main.
-        run(crop(4.0))
-        assertEquals(1, z.level)
-        // Far: fits the telephoto (> 8.775x) → telephoto, one step at a time.
-        run(crop(10.0))
-        assertEquals(2, z.level)
-        // Coming close fast: straight down to the lens that still sees the crop.
-        t += 100_000_000L
-        z.update(t, crop(1.8))
-        assertEquals(0, z.level)
+        assertTrue(z.onTele)
     }
 
     @Test

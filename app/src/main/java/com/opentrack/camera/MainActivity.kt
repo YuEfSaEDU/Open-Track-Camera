@@ -769,7 +769,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** The crop zoom (vs the main lens) from which the telephoto is used, or null. */
-    private fun hybridFromZoom(): Double? = ladder()?.takeIf { pipeline?.hybrid != null && it.last() > 1.3f }?.let { scaleOf(it.last().toDouble()) * HybridZoom.ENTER_ROOM }
+    private fun hybridFromZoom(): Double? = ladder()?.takeIf { pipeline?.hybrid != null && it.last() > 1.3f }?.let { scaleOf(it.last().toDouble()) * HybridZoom.HEADROOM }
 
     /** Creates (or removes) hybrid zoom for the current camera and settings. */
     private fun applyHybrid(announce: Boolean) {
@@ -778,14 +778,19 @@ class MainActivity : AppCompatActivity() {
         val steps = ladder()
         val wasOn = rp?.hybrid != null
         val hz = if (hybridOn && rp != null && p != null && steps != null && analysis?.supportsWindows == true) {
-            HybridZoom(hybridLevels(steps) ?: steps.map { it.toDouble() / steps.first() }, p.sourceSize.width, p.sourceSize.height)
+            // The camera zoom follows the crop on the main lens, then the telephoto (see HybridZoom).
+            HybridZoom(
+                p.sourceSize.width, p.sourceSize.height,
+                tele = steps.last().toDouble() / steps.first(),
+                maxRatio = (lens?.zoomRange?.upper ?: steps.last()).toDouble() / steps.first(),
+            )
         } else null
         rp?.hybrid = hz
         hybridTarget = null
         applyReference()
         if (hz != null && !wasOn && steps != null) {
             // The auto zoom must reach from the wide angle to the telephoto.
-            val far = scaleOf(steps.last().toDouble()) * HybridZoom.ENTER_ROOM
+            val far = scaleOf(steps.last().toDouble()) * HybridZoom.HEADROOM
             updateZoomConfig(zoomConfig.copy(minZoom = uiRef(), maxZoom = minOf(ZOOM_MAX, maxOf(zoomConfig.maxZoom, kotlin.math.ceil(far + 2.0)))))
         } else if (zoomConfig.minZoom < uiRef()) {
             // Narrower reference (hybrid zoom off): limits below its whole frame mean that frame.
@@ -889,15 +894,7 @@ class MainActivity : AppCompatActivity() {
         lensModels[key] = m
         // The reference lens: the gyroscope's focal length changes with it.
         if (key == lensKeyFor(null, refZoom())) applyReference()
-        // Hybrid zoom's lens views follow (staying on the lens it is on).
-        val rp = pipeline
-        val p = profile
-        val old = rp?.hybrid
-        val levels = ladder()?.let { hybridLevels(it) }
-        if (rp != null && p != null && old != null && levels != null && levels.size == old.levels.size) {
-            rp.hybrid = HybridZoom(levels, p.sourceSize.width, p.sourceSize.height, startLevel = old.level)
-        }
-        p?.let { setupSliders(it) }
+        profile?.let { setupSliders(it) }
         refreshButtons()
     }
 
@@ -1057,13 +1054,6 @@ class MainActivity : AppCompatActivity() {
     /** [scaleOf] the reference space: crop zooms shown and set are relative to the main lens. */
     private fun uiRef(): Double = scaleOf(refZoom())
 
-    /** Hybrid zoom's levels: each lens's real view relative to the widest; null when not rising. */
-    private fun hybridLevels(steps: List<Float>): List<Double>? {
-        val base = scaleOf(steps.first().toDouble())
-        val levels = steps.map { scaleOf(it.toDouble()) / base }
-        return levels.takeIf { it.first() == 1.0 && it.zipWithNext().all { (a, b) -> b > a * 1.05 } }
-    }
-
     private fun onChange(block: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
         override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
             if (fromUser) block(progress)
@@ -1218,7 +1208,7 @@ class MainActivity : AppCompatActivity() {
                 TrackState.COASTING -> R.string.state_coasting
                 TrackState.LOST -> R.string.state_lost
             },
-        )
+        ) + if (s.trackState == TrackState.TRACKING && !s.targetConfirmed) getString(R.string.state_tentative) else ""
         val exposure = camera?.takeIf { it.lastExposureNs > 0 }?.let { "1/${(1e9 / it.lastExposureNs).roundToInt()} s ISO ${it.lastIso}" } ?: "-"
         status.text = lensNow() + " · " + getString(R.string.status, p.label, outputWidth, outputHeight, p.fps, s.fps, s.analysisMs, s.neuralMs, stateText, exposure)
         if (zoomConfig.auto) {

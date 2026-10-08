@@ -94,4 +94,5 @@
     <string name="lens_calibration_reset">Lens calibration cleared: measured again while you pan over textured scenery.</string>
     <string name="lens_calibrating">calibrating %1$s %2$d%%</string>
     <string name="low_fps">%1$s gives only %2$.0f fps here (the camera does not hold this rate). For smooth video pick a rate it supports with the Stream button (e.g. 4K30), or use the main lens for 4K60.</string>
+    <string name="state_tentative">\u0020(checking: no zoom yet)</string>
 </resources>

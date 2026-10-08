@@ -106,9 +106,13 @@ class RenderPipeline(
 
     /** The user (camera zoom slider) or hybrid zoom asked the camera for [ratio]. */
     fun zoomRequested(ratio: Double) {
+        // Only a jump (a lens change) is worth waiting for: small steps are mapped with the
+        // previous ratio for the frame or two before their results are in.
+        if (kotlin.math.abs(kotlin.math.ln(ratio / requestedZoom)) > 0.05) requestedAtNs = System.nanoTime()
         requestedZoom = ratio
-        requestedAtNs = System.nanoTime()
     }
+
+    private var lastZoomRequestNs = 0L
 
     /** The last render error, for the camera report. */
     @Volatile var lastError: String? = null
@@ -358,8 +362,14 @@ class RenderPipeline(
         val live = framing.update(ts, framed)
         analysis.meterCrop = live
         hybrid?.let { hz ->
+            val wasTele = hz.onTele
             val r = hz.update(ts, live) * baseZoom
-            if (r != requestedZoom) {
+            // The camera zoom follows the crop continuously, in requests ~10 per second at most
+            // (each is a new repeating request); a lens change goes out at once.
+            val change = kotlin.math.abs(kotlin.math.ln(r / requestedZoom))
+            val now = System.nanoTime()
+            if (hz.onTele != wasTele || (change >= ZOOM_REQUEST_STEP && now - lastZoomRequestNs >= ZOOM_REQUEST_INTERVAL_NS) || (change > 1e-6 && (r == baseZoom))) {
+                lastZoomRequestNs = now
                 zoomRequested(r)
                 listener.onZoomRequest(r)
             }
@@ -590,5 +600,9 @@ class RenderPipeline(
         /** After a zoom request: frames whose zoom ratio is not known yet wait for it, up to... */
         const val ZOOM_WAIT_WINDOW_NS = 500_000_000L
         const val ZOOM_WAIT_NS = 12_000_000L
+
+        /** Hybrid zoom: smallest camera zoom change worth a request (ln), and the least time between them. */
+        const val ZOOM_REQUEST_STEP = 0.02
+        const val ZOOM_REQUEST_INTERVAL_NS = 100_000_000L
     }
 }

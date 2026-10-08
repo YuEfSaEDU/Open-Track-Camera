@@ -1,6 +1,8 @@
 package com.opentrack.tracking
 
 import kotlin.math.abs
+import kotlin.math.exp
+import kotlin.math.ln
 
 /**
  * Maps a frame taken at camera zoom ratio [zoom] (the HAL's centered crop, or another lens of a
@@ -39,98 +41,98 @@ fun Box.intersect(o: Box): Box? {
 }
 
 /**
- * Hybrid zoom: picks the camera zoom ratio of a multi-camera (whose HAL changes lens with it)
- * from the crop the framing wants, so the crop is always taken from the longest lens that
- * sees it: the wide angle when the aircraft is close (a crop wider than the main lens's view),
- * the main lens, the telephoto when it is far (real detail instead of enlarging).
+ * Hybrid zoom: drives the camera zoom ratio of a multi-camera (whose HAL changes lens with it)
+ * from the crop, the way the phone's own camera zooms: the ratio grows with the crop zoom on
+ * the main lens (the camera's own zoom, which keeps more detail than enlarging a crop of the
+ * whole frame), and past a crop size it moves on to the telephoto.
  *
- * [levels] are the zoom ratios to choose from relative to the reference space (ascending, the
- * first 1: the whole reference frame); level k sees the middle 1/levels[k] of it. A longer
- * lens is used once the crop, with room around it ([enterRoom]: look-ahead stabilization and
- * target motion), has fitted in its view for [enterDelayS]; it is left as soon as the crop,
- * with less room ([exitRoom]), no longer does (zooming out, the aircraft drifting off-center),
- * for the longest lens it still fits. The gap between the two and a minimum time on each lens
- * ([minHoldS]) keep it from flipping back and forth.
+ * The camera frame at ratio z (relative to the reference space) sees the middle 1/z of the
+ * reference frame; the ratio is chosen so that the crop, grown by [headroom] (room for the
+ * look-ahead stabilization and target motion), stays inside it, also when the crop is off
+ * center. Tracking, framing and stabilization run in the reference space and every frame is
+ * mapped with its own ratio, so the picture stays continuous however the ratio moves.
+ *
+ * [tele]: the telephoto's ratio (null: main lens only). The main lens is held below
+ * [mainLimit] x [tele] (the HAL's own switch point is near [tele]: hovering around it would
+ * flip lenses); once the crop fits the telephoto's view with [headroom], the ratio steps to
+ * [tele] or beyond, and back below once it no longer fits with [exitRoom], holding each lens
+ * for at least [minHoldS].
  */
 class HybridZoom(
-    val levels: List<Double>,
     private val width: Int,
     private val height: Int,
-    private val enterRoom: Double = ENTER_ROOM,
+    val tele: Double?,
+    /** Highest ratio to request (relative). */
+    private val maxRatio: Double,
+    private val headroom: Double = HEADROOM,
     private val exitRoom: Double = 1.1,
+    private val mainLimit: Double = 0.9,
     private val minHoldS: Double = 1.0,
-    /** The crop must fit for this long before switching to a longer lens. */
+    /** The crop must fit the telephoto for this long before switching to it. */
     private val enterDelayS: Double = 0.3,
-    /** The level to start on (e.g. new [levels] for the same lenses while on one of them). */
-    startLevel: Int = 0,
+    /** Start on the telephoto (new settings while on it). */
+    startOnTele: Boolean = false,
 ) {
-    /** Two levels: the reference (1) and a telephoto at [teleRatio]. */
-    constructor(teleRatio: Double, width: Int, height: Int) : this(listOf(1.0, teleRatio), width, height)
-
-    init {
-        require(levels.isNotEmpty() && levels.first() == 1.0 && levels.zipWithNext().all { (a, b) -> b > a }) { "levels must rise from 1: $levels" }
-    }
-
-    /** The longest lens's ratio. */
-    val teleRatio: Double get() = levels.last()
-
-    /** Index of the current level in [levels]. */
-    var level = startLevel.coerceIn(0, levels.size - 1)
+    /** The zoom ratio to request, relative to the reference space (1 = its whole frame). */
+    var ratio = 1.0
         private set
 
-    /** The zoom ratio to request (relative to the reference space). */
-    val ratio: Double get() = levels[level]
+    /** Whether the telephoto is in use. */
+    var onTele = startOnTele && tele != null
+        private set
 
     private var lastSwitchNs = Long.MIN_VALUE
     private var fitsSinceNs = Long.MIN_VALUE
 
-    private val windows = levels.map { ZoomMap(it, width, height).visible }
-
-    /** Whether [crop] (reference px), grown by [room], lies inside the view of level [k]. */
-    fun fits(k: Int, crop: CropWindow, room: Double): Boolean {
-        if (k == 0) return true // the whole reference frame: framing keeps the crop in it
-        val win = windows[k]
+    /** Largest ratio whose (centered) view still contains [crop] grown by [room]. */
+    fun coverRatio(crop: CropWindow, room: Double): Double {
         val e = crop.halfExtents()
-        return abs(crop.cx - win.cx) + e.x * room <= win.width / 2 &&
-            abs(crop.cy - win.cy) + e.y * room <= win.height / 2
+        val rx = width / (2 * (abs(crop.cx - width / 2.0) + e.x * room))
+        val ry = height / (2 * (abs(crop.cy - height / 2.0) + e.y * room))
+        return minOf(rx, ry).coerceAtLeast(1.0)
     }
-
-    /** Whether [crop] fits the longest lens's view with [room]. */
-    fun fitsTele(crop: CropWindow, room: Double): Boolean = fits(levels.size - 1, crop, room)
 
     /** New live crop (reference px) at [timestampNs]; returns the zoom ratio to request. */
     fun update(timestampNs: Long, crop: CropWindow): Double {
-        if (!fits(level, crop, exitRoom)) {
-            // Leaving is never delayed: the crop is about to need pixels this lens lacks.
-            var k = level - 1
-            while (k > 0 && !fits(k, crop, exitRoom)) k--
-            switchTo(k, timestampNs)
-            return ratio
-        }
+        val need = coverRatio(crop, headroom)
+        val t = tele
+        if (t == null) return set(need.coerceAtMost(maxRatio))
         val held = lastSwitchNs == Long.MIN_VALUE || (timestampNs - lastSwitchNs) * 1e-9 >= minHoldS
-        if (level + 1 < levels.size && fits(level + 1, crop, enterRoom)) {
+        if (onTele) {
+            // Leaving is never delayed: the crop is about to need pixels the telephoto lacks.
+            if (coverRatio(crop, exitRoom) < t) {
+                onTele = false
+                lastSwitchNs = timestampNs
+                fitsSinceNs = Long.MIN_VALUE
+            }
+        } else if (need >= t) {
             if (fitsSinceNs == Long.MIN_VALUE) fitsSinceNs = timestampNs
-            if (held && (timestampNs - fitsSinceNs) * 1e-9 >= enterDelayS) switchTo(level + 1, timestampNs)
+            if (held && (timestampNs - fitsSinceNs) * 1e-9 >= enterDelayS) {
+                onTele = true
+                lastSwitchNs = timestampNs
+            }
         } else {
             fitsSinceNs = Long.MIN_VALUE
         }
-        return ratio
+        return set(if (onTele) need.coerceIn(t, maxOf(t, maxRatio)) else need.coerceAtMost(t * mainLimit))
     }
 
     fun reset() {
-        level = 0
+        ratio = 1.0
+        onTele = false
         lastSwitchNs = Long.MIN_VALUE
         fitsSinceNs = Long.MIN_VALUE
     }
 
-    private fun switchTo(k: Int, timestampNs: Long) {
-        level = k
-        lastSwitchNs = timestampNs
-        fitsSinceNs = Long.MIN_VALUE
+    /** Steps of 1% (no capture request per tiny change). */
+    private fun set(r: Double): Double {
+        ratio = exp(Math.round(ln(r) / STEP) * STEP)
+        return ratio
     }
 
     companion object {
-        /** Default [enterRoom]: a lens is used from a crop zoom of its ratio x this. */
-        const val ENTER_ROOM = 1.35
+        /** Default [headroom]: the crop is at most 1 / this of the camera frame. */
+        const val HEADROOM = 1.35
+        private const val STEP = 0.01
     }
 }

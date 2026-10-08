@@ -21,14 +21,14 @@ data class ZoomConfig(
     /** ...when zooming out (widening to keep the target is more urgent). */
     val responseOutS: Double = 0.6,
     /** Max zoom speed, ln units per second. Zooming out is allowed to be faster. */
-    val maxZoomInRate: Double = 0.3,
+    val maxZoomInRate: Double = 0.4,
     val maxZoomOutRate: Double = 0.9,
     /**
      * Max zoom acceleration, ln units per second²: a zoom starts and stops gently instead of at
      * full speed at once (like an operator easing a zoom ring). Out is quicker (losing the
      * target is worse than a loose frame).
      */
-    val maxZoomInAccel: Double = 0.35,
+    val maxZoomInAccel: Double = 0.5,
     val maxZoomOutAccel: Double = 1.2,
     /** While the tracker only predicts, widen by this factor per second of coasting. */
     val coastWidenPerS: Double = 0.3,

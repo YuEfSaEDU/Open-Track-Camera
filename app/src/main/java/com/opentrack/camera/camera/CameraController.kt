@@ -3,6 +3,7 @@ package com.opentrack.camera.camera
 import android.annotation.SuppressLint
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
@@ -159,6 +160,31 @@ class CameraController(
             applySettings(newSettings)
         }
     }
+
+    /**
+     * The camera moved to another physical lens on its own (its switch point, not one hybrid
+     * zoom announced with [updateForLens]): shutter priority follows the aperture difference.
+     */
+    private fun onLensChanged(from: String, to: String) {
+        if (to == expectedLens && SystemClock.elapsedRealtimeNanos() - expectedSinceNs < 1_500_000_000L) return
+        if (!manualActive) return
+        val factor = light(to) / light(from)
+        if (kotlin.math.abs(factor - 1) <= 0.02) return
+        ae?.compensate(factor)
+        expectedLens = to
+        expectedSinceNs = SystemClock.elapsedRealtimeNanos()
+        applySettings(settings)
+    }
+
+    /** Light a physical lens lets in (1 / f-number²), 1 when unknown. */
+    private fun light(id: String): Double {
+        val n = apertures.getOrPut(id) {
+            runCatching { manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull()?.toDouble() }.getOrNull() ?: 0.0
+        }
+        return if (n > 0) 1 / (n * n) else 1.0
+    }
+
+    private val apertures = HashMap<String, Double>()
 
     /** The lens hybrid zoom asked for; metering frames of another lens are skipped (handler thread). */
     private var expectedLens: String? = null
@@ -363,7 +389,11 @@ class CameraController(
                 zoomPhysical[zoomNext] = result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)
                 zoomNext = (zoomNext + 1) % SHOT_HISTORY
             }
-            result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { activePhysicalId = it }
+            result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { id ->
+                val before = activePhysicalId
+                activePhysicalId = id
+                if (before != null && before != id) handler.post { onLensChanged(before, id) }
+            }
             if (result.get(CaptureResult.CONTROL_AE_MODE) != CameraMetadata.CONTROL_AE_MODE_OFF) {
                 aeSettled = when (result.get(CaptureResult.CONTROL_AE_STATE)) {
                     CameraMetadata.CONTROL_AE_STATE_CONVERGED, CameraMetadata.CONTROL_AE_STATE_LOCKED, CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED -> true

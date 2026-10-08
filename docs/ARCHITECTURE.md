@@ -411,11 +411,22 @@ geçişleri görünür kılıyordu; merdiven kodu (`HybridZoom`) istenirse daha 
   Kadraj (`FramingController.visible`) kırpmayı görünen bölgede tutar, look-ahead yolu her kare için
   `capture ∩ visible` ile sınırlanır, perspektif düzeltmesi yalnız geçerli bölgeye sığar, gökyüzü
   dedektörü kenara değen lekeleri, pozometre siyah kısmı yok sayar.
-- Karar histerezisli: bir sonraki (daha uzun) lensin görüşüne kırpma %35 payla 0.3 s sığarsa ona
-  geçilir; geçerli lensin görüşüne %10 payla sığmadığı anda (gecikmesiz) hâlâ sığdığı en uzun lense
-  dönülür; her lenste en az 1 s. Kırpma zoomu (ana lense göre) `oran × 1.35`'ten büyükken o lens
-  kullanılır: tele ~3.5x'ten, ana ~1.35x'ten. Hibrit açılınca otomatik zoom sınırları merdiveni
-  kapsayacak şekilde ayarlanır (min 0.4x, maks ≥ 6x).
+- **Sürekli kamera zoomu** (v0.1.34, telefonun kendi kamerası gibi): kamera zoom oranı kırpmayı
+  izler: oran = kırpmayı `HEADROOM` (1.35) payıyla (merkez dışındaysa ona göre) içine alan en büyük
+  oran. Ana lens önce kendi (sensör) zoomuyla yakınlaşır, telefoto oranının 0.9 katında (2.7x)
+  tutulur (HAL'ın geçiş noktasında gidip gelmesin); kırpma telefotonun görüşüne payıyla 0.3 s sığınca
+  telefotoya (≥3x) geçilir, %10 payla sığmadığı anda gecikmesiz ana lense dönülür; her lenste en az
+  1 s. İstekler %2 adımlarla en fazla ~10/s; lens değişimi hemen gider. Her kare kendi oranıyla
+  eşlendiği için oran nasıl değişirse değişsin görüntü sürekli kalır. Önceki sürüm 1x → 3x tek adım
+  atıyordu.
+- Telefoto ~4x kırpma zoomundan (`3 × 1.35`) kullanılır; hibrit açılınca otomatik zoom sınırları
+  buna göre ayarlanır.
+- Lens değişiminde enstantane önceliği diyafram farkını telafi eder: hibrit zoom'un istediği
+  değişimde aynı istekte, HAL'ın kendiliğinden yaptığında ilk karesinde (`onLensChanged`).
+- Doğrulanmamış kilit: sinir ağı yakından bakıp uçak görmediği sürece 2.5 s tutulan kilit de
+  kadrajlanır ve zoom yapılır (`TrackerConfig.trustAfterNs`); uzak uçak dedektör için çok küçük
+  kaldığında zoom uzun süre geniş kalıyordu. Durum satırı beklerken "doğrulanıyor: henüz zoom yok"
+  gösterir.
 - Kırpma zoomu ve otomatik zoom sınırları **ana lense göre** gösterilir (telefonun kamerası gibi:
   0.4x geniş açının tamamı); kaydırıcılar referans uzayın tüm karesinden 10x'e kadar.
 - Zoom isteğinden sonraki 0.5 s içinde sonucu henüz gelmemiş kare 12 ms'ye kadar bekletilir (yanlış

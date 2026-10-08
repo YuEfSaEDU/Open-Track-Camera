@@ -136,6 +136,12 @@ data class TrackerConfig(
      * a cloud or a speck on the ground does not.
      */
     val minFramableSpeedPxS: Double = 60.0,
+    /**
+     * A lock held this long without the neural detector ever looking closely and not seeing an
+     * aircraft is framed (and zoomed in on) even unconfirmed: a distant aircraft is often too
+     * small for the detector, and waiting for it left the zoom wide for a long time.
+     */
+    val trustAfterNs: Long = 2_500_000_000L,
     /** Smallest zoomed detector region as a fraction of the frame height (DetectionPlanConfig.minSideFraction). */
     val roiMinSideFraction: Double = 0.15,
     /** Neural detections disagreeing with the template this many times in a row force a re-seed. */
@@ -234,6 +240,7 @@ class TargetTracker(
     private var confirmedThisFrame = false
     /** Framing may follow this track (see [TrackPrediction.framable]); latched until the next track. */
     private var framableLatched = false
+    private var trackStartNs = 0L
     /** Neural runs have been reported at least once (otherwise there is nothing to verify with). */
     private var neuralSeen = false
     private var frameHeightPx = 2160.0
@@ -545,6 +552,7 @@ class TargetTracker(
         val verifiable = size >= config.minRecognizableSourcePx && size * NEURAL_INPUT_PX / smallestRegion >= config.minRecognizablePx
         val speed = sqrt(fx.velocity * fx.velocity + fy.velocity * fy.velocity)
         if (!verifiable && state == TrackState.TRACKING && speed >= config.minFramableSpeedPxS * frameWidthPx / 3840.0) framableLatched = true
+        if (state == TrackState.TRACKING && unconfirmedRuns == 0 && lastSeenNs - trackStartNs >= config.trustAfterNs) framableLatched = true
         return framableLatched
     }
 
@@ -565,6 +573,7 @@ class TargetTracker(
         fy.reset(w.y, posVar, 0.0, velVar)
         filterTimeNs = t
         lastSeenNs = t
+        trackStartNs = t
         width = box.width
         height = box.height
         sizeFromNeural = false
