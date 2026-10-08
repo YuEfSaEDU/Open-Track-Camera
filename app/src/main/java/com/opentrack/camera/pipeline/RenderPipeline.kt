@@ -320,10 +320,12 @@ class RenderPipeline(
 
         // 0. Where this frame sits in the reference space (its own zoom ratio / lens).
         val z = frameZoom(ts)
+        // (Known for sure only once the frame's capture result is in; see YuvRing.remap.)
+        val exactZoom = zoomAt?.invoke(ts) != null || !zoomReported
         val lensKey = lensKeyAt?.invoke(ts, z)
         val model = lensKey?.let { lensModel?.invoke(it) }
         val f = focalPx
-        val map = ZoomMap(if (model != null && f > 0) model.focalAt(z) / f else z / baseZoom, srcW, srcH)
+        val map = mapFor(z, model)
         renderer.setLens(model?.a ?: 0.0, (model?.focalAt(z) ?: srcW.toDouble()) / srcW, srcW.toDouble() / srcH)
         val frameLens = if (lensKey != null && model != null && f > 0) FrameLens(lensKey, z, map.zoom, model, f) else null
         frameMap = map
@@ -364,8 +366,8 @@ class RenderPipeline(
         hybrid?.let { hz ->
             val wasTele = hz.onTele
             val r = hz.update(ts, live) * baseZoom
-            // The camera zoom follows the crop continuously, in requests ~10 per second at most
-            // (each is a new repeating request); a lens change goes out at once.
+            // The camera zoom follows the crop continuously, in small steps up to ~30 per second (each
+            // is a new repeating request, like a pinch zoom); a lens change goes out at once.
             val change = kotlin.math.abs(kotlin.math.ln(r / requestedZoom))
             val now = System.nanoTime()
             if (hz.onTele != wasTele || (change >= ZOOM_REQUEST_STEP && now - lastZoomRequestNs >= ZOOM_REQUEST_INTERVAL_NS) || (change > 1e-6 && (r == baseZoom))) {
@@ -375,7 +377,7 @@ class RenderPipeline(
             }
         }
         val capture = captureFor(live)
-        ring?.store(renderer, texture, texMatrix, srcW, srcH, capture, ts, map)
+        ring?.store(renderer, texture, texMatrix, srcW, srcH, capture, ts, map, exactZoom)
         telemetry?.let { t ->
             val pose = motion.poseAt(ts)
             t.line("live").i("ts", ts).a("crop", live.cx, live.cy, live.width, live.height).n("rot", live.rotation, 4)
@@ -403,7 +405,7 @@ class RenderPipeline(
             if (previewMode == PreviewMode.OUTPUT && out != null) {
                 val (x, y, cw, ch) = fit(vw, vh, out.crop.width / out.crop.height)
                 GLES20.glViewport(x, y, cw, ch)
-                ring?.let { r -> r.find(out.timestampNs)?.let { r.draw(it, out.crop, shutterFor(out.timestampNs, it.zoom), homographyFor(out, it), YuvRing.sharpenFor(outputWidth / (out.crop.width * it.zoom))) } }
+                ring?.let { r -> findSlot(r, out.timestampNs)?.let { r.draw(it, out.crop, shutterFor(out.timestampNs, it.zoom), homographyFor(out, it), YuvRing.sharpenFor(outputWidth / (out.crop.width * it.zoom))) } }
             } else {
                 val (x, y, cw, ch) = fit(vw, vh, srcW.toDouble() / srcH)
                 GLES20.glViewport(x, y, cw, ch)
@@ -431,7 +433,7 @@ class RenderPipeline(
 
     private fun writeEncoder(enc: EGLSurface, out: LookaheadFramer.Output) {
         if (out.timestampNs < recordFromNs) return
-        val slot = ring?.find(out.timestampNs) ?: return
+        val slot = ring?.let { findSlot(it, out.timestampNs) } ?: return
         egl.makeCurrent(enc)
         GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
         val h = homographyFor(out, slot)
@@ -462,6 +464,25 @@ class RenderPipeline(
      * frame; right after a zoom request it may not have, and guessing wrong there would jump the
      * picture for a frame, so it is briefly waited for.
      */
+    /** Reference space → frame of zoom ratio [z] taken by a lens with [model] (null: trust the ratio). */
+    private fun mapFor(z: Double, model: LensModel?): ZoomMap {
+        val f = focalPx
+        return ZoomMap(if (model != null && f > 0) model.focalAt(z) / f else z / baseZoom, srcW, srcH)
+    }
+
+    /** The ring slot of frame [ts], its mapping corrected if it was stored before the frame's zoom was known. */
+    private fun findSlot(r: YuvRing, ts: Long): YuvRing.Slot? {
+        val slot = r.find(ts) ?: return null
+        if (!slot.exact) {
+            val z = zoomAt?.invoke(ts)
+            if (z != null && z > 0) {
+                val model = lensKeyAt?.invoke(ts, z)?.let { lensModel?.invoke(it) }
+                r.remap(slot, mapFor(z, model))
+            }
+        }
+        return slot
+    }
+
     private fun frameZoom(ts: Long): Double {
         val lookup = zoomAt ?: return lastZoom
         var z = lookup(ts)
@@ -602,7 +623,7 @@ class RenderPipeline(
         const val ZOOM_WAIT_NS = 12_000_000L
 
         /** Hybrid zoom: smallest camera zoom change worth a request (ln), and the least time between them. */
-        const val ZOOM_REQUEST_STEP = 0.02
-        const val ZOOM_REQUEST_INTERVAL_NS = 100_000_000L
+        const val ZOOM_REQUEST_STEP = 0.003
+        const val ZOOM_REQUEST_INTERVAL_NS = 33_000_000L
     }
 }

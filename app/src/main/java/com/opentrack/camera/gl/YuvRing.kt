@@ -40,6 +40,10 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
         var valid: Box? = null
         /** The frame's camera zoom ratio. */
         var zoom = 1.0
+        /** The stored region in the camera frame (stream px): what [capture] really is once its mapping is known. */
+        var stream: Box? = null
+        /** False while the frame's zoom ratio was not known when it was stored (see [remap]). */
+        var exact = true
     }
 
     private val slots: Array<Slot> = Array(capacity) { createSlot() }
@@ -55,6 +59,8 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
     fun store(
         renderer: FrameRenderer, texture: Int, texMatrix: FloatArray, sourceW: Int, sourceH: Int, capture: Box, timestampNs: Long,
         map: ZoomMap = ZoomMap.identity(sourceW, sourceH),
+        /** Whether [map] is the frame's own (else [remap] it once known). */
+        exact: Boolean = true,
     ) {
         val slot = slots[next]
         next = (next + 1) % slots.size
@@ -74,6 +80,23 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
         slot.capture = capture
         slot.valid = if (map.zoom > 1.0) capture.intersect(map.visible) else capture
         slot.zoom = map.zoom
+        slot.stream = s
+        slot.exact = exact
+    }
+
+    /**
+     * The frame's real mapping, known now (its capture result came after the frame was stored
+     * with the previous one): the stored pixels are the same camera region, which is this part of
+     * the reference space. Drawing then uses the exact region: a continuously zooming camera
+     * stays smooth instead of jumping by a step for a frame.
+     */
+    fun remap(slot: Slot, map: ZoomMap) {
+        val s = slot.stream ?: return
+        val capture = map.toRef(s)
+        slot.capture = capture
+        slot.valid = if (map.zoom > 1.0) capture.intersect(map.visible) else capture
+        slot.zoom = map.zoom
+        slot.exact = true
     }
 
     fun find(timestampNs: Long): Slot? = slots.firstOrNull { it.timestampNs == timestampNs }

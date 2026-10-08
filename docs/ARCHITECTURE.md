@@ -416,7 +416,10 @@ geçişleri görünür kılıyordu; merdiven kodu (`HybridZoom`) istenirse daha 
   oran. Ana lens önce kendi (sensör) zoomuyla yakınlaşır, telefoto oranının 0.9 katında (2.7x)
   tutulur (HAL'ın geçiş noktasında gidip gelmesin); kırpma telefotonun görüşüne payıyla 0.3 s sığınca
   telefotoya (≥3x) geçilir, %10 payla sığmadığı anda gecikmesiz ana lense dönülür; her lenste en az
-  1 s. İstekler %2 adımlarla en fazla ~10/s; lens değişimi hemen gider. Her kare kendi oranıyla
+  1 s. İstekler %0.3 adımlarla en fazla ~30/s (parmakla zoom gibi; v0.1.34'teki %2 / 10 Hz adımlar
+  düşük kare hızlı zoom gibi görünüyordu); lens değişimi hemen gider. Capture result'ı kareden sonra
+  gelen bir kare önceki oranla halka tampona yazılır, çıkışta kendi oranıyla yeniden eşlenir
+  (`YuvRing.remap`: saklanan akış bölgesi aynı, referans uzaydaki yeri düzeltilir), kayıtta adım olmaz. Her kare kendi oranıyla
   eşlendiği için oran nasıl değişirse değişsin görüntü sürekli kalır. Önceki sürüm 1x → 3x tek adım
   atıyordu.
 - Telefoto ~4x kırpma zoomundan (`3 × 1.35`) kullanılır; hibrit açılınca otomatik zoom sınırları

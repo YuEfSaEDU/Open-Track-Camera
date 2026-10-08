@@ -124,7 +124,7 @@ class HybridZoom(
         fitsSinceNs = Long.MIN_VALUE
     }
 
-    /** Steps of 1% (no capture request per tiny change). */
+    /** Steps of 0.2% (no capture request per tiny change). */
     private fun set(r: Double): Double {
         ratio = exp(Math.round(ln(r) / STEP) * STEP)
         return ratio
@@ -133,6 +133,6 @@ class HybridZoom(
     companion object {
         /** Default [headroom]: the crop is at most 1 / this of the camera frame. */
         const val HEADROOM = 1.35
-        private const val STEP = 0.01
+        private const val STEP = 0.002
     }
 }
