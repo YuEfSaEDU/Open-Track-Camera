@@ -2,7 +2,6 @@ package com.opentrack.camera.detect
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.util.Log
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
@@ -13,17 +12,21 @@ import com.opentrack.tracking.Detection
 import com.opentrack.tracking.DetectionSource
 
 /**
- * Neural aircraft detector: MediaPipe EfficientDet-Lite (COCO), restricted to the
- * "airplane" class. Additional classes (birds, drones, ...) can be enabled later through
- * [labels] or a custom model.
+ * Neural detector: a [DetectorModel] (the app's own aircraft model, or COCO EfficientDet-Lite0),
+ * restricted to the classes of a [TargetClasses] choice (aircraft by default).
  */
 class AircraftDetector private constructor(private val detector: ObjectDetector) : AutoCloseable {
+    private var closed = false
 
     /**
      * Runs detection on [bitmap], an image of the source [region] (source px; the whole frame
      * or a zoomed part of it). Boxes are returned in source pixels.
      */
+    @Synchronized
     fun detect(bitmap: Bitmap, timestampNs: Long, region: Box): List<Detection> {
+        // One instance serves the live pipeline and gallery processing in turn; calls are
+        // serialized and a closed detector just reports nothing.
+        if (closed) return emptyList()
         val result = detector.detect(BitmapImageBuilder(bitmap).build())
         val kx = region.width / bitmap.width
         val ky = region.height / bitmap.height
@@ -42,28 +45,34 @@ class AircraftDetector private constructor(private val detector: ObjectDetector)
         }
     }
 
-    override fun close() = detector.close()
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        try {
+            detector.close()
+        } catch (e: Exception) {
+            // MediaPipe rethrows the last graph error on close; the detector is gone either way.
+        }
+    }
 
     companion object {
-        const val MODEL = "models/efficientdet_lite0.tflite"
-        val labels = listOf("airplane")
-
-        fun create(context: Context, scoreThreshold: Float = 0.35f): AircraftDetector? {
-            for (delegate in listOf(Delegate.GPU, Delegate.CPU)) {
-                try {
-                    val options = ObjectDetector.ObjectDetectorOptions.builder()
-                        .setBaseOptions(BaseOptions.builder().setModelAssetPath(MODEL).setDelegate(delegate).build())
-                        .setRunningMode(RunningMode.IMAGE)
-                        .setMaxResults(5)
-                        .setScoreThreshold(scoreThreshold)
-                        .setCategoryAllowlist(labels)
-                        .build()
-                    return AircraftDetector(ObjectDetector.createFromOptions(context, options))
-                } catch (e: Exception) {
-                    Log.w("AircraftDetector", "delegate $delegate unavailable", e)
-                }
-            }
-            return null
+        /**
+         * Creates the detector with [delegate]; throws when it is unavailable. Use it on the
+         * thread that created it (see [DetectorHost]).
+         */
+        fun create(context: Context, delegate: Delegate, model: DetectorModel, labels: Collection<String>, scoreThreshold: Float = model.scoreThreshold): AircraftDetector {
+            val options = ObjectDetector.ObjectDetectorOptions.builder()
+                .setBaseOptions(BaseOptions.builder().setModelAssetPath(model.asset).setDelegate(delegate).build())
+                .setRunningMode(RunningMode.IMAGE)
+                // Room for an aircraft among cars and boats at an airshow.
+                .setMaxResults(10)
+                .setScoreThreshold(scoreThreshold)
+                // Only the chosen classes: suppression of overlapping boxes must not let, say, a
+                // "car" box hide an "airplane" box on the same jet when only aircraft are wanted.
+                .setCategoryAllowlist(labels.toList())
+                .build()
+            return AircraftDetector(ObjectDetector.createFromOptions(context, options))
         }
     }
 }

@@ -41,10 +41,18 @@ class DetectionPlanner(
     private var scanIndex = 0
 
     /**
-     * Region (square, source px, inside the frame) for the next run, or null for the whole
-     * frame. [target] is the aircraft's expected image position at the time of the frame.
+     * The part of the source frame the camera frame shows (hybrid zoom on a longer lens), null =
+     * all: regions and scan tiles are sized and placed in it, at that lens's own detail.
      */
-    fun next(p: TrackPrediction, target: Vec2?, timestampNs: Long): Box? {
+    private var view: Box? = null
+
+    /**
+     * Region (square, source px, inside the frame) for the next run, or null for the whole
+     * frame ([view] if given). [target] is the aircraft's expected image position at the time
+     * of the frame.
+     */
+    fun next(p: TrackPrediction, target: Vec2?, timestampNs: Long, view: Box? = null): Box? {
+        this.view = view
         val n = runs++
         val unseenS = ((timestampNs - p.lastMeasuredNs) * 1e-9).coerceAtLeast(0.0)
         if (target == null || p.state == TrackState.IDLE || (p.state == TrackState.LOST && unseenS * 1e9 > config.maxLostNs)) {
@@ -57,25 +65,31 @@ class DetectionPlanner(
 
     /** Next tile of the scan: overlapping squares covering the frame, top row (sky) first. */
     private fun scanTile(): Box {
-        val side = sourceHeight * config.scanTileFraction
-        val cols = kotlin.math.ceil((sourceWidth - side) / side).toInt() + 1
-        val rows = kotlin.math.ceil((sourceHeight - side) / side).toInt() + 1
+        val f = frame()
+        val w = f.width
+        val h = f.height
+        val side = h * config.scanTileFraction
+        val cols = kotlin.math.ceil((w - side) / side).toInt() + 1
+        val rows = kotlin.math.ceil((h - side) / side).toInt() + 1
         val i = scanIndex++ % (cols * rows)
         val col = i % cols
         val row = i / cols
-        val x = if (cols == 1) sourceWidth / 2.0 else side / 2 + col * (sourceWidth - side) / (cols - 1)
-        val y = if (rows == 1) sourceHeight / 2.0 else side / 2 + row * (sourceHeight - side) / (rows - 1)
-        return Box(x, y, side, side)
+        val x = if (cols == 1) w / 2 else side / 2 + col * (w - side) / (cols - 1)
+        val y = if (rows == 1) h / 2 else side / 2 + row * (h - side) / (rows - 1)
+        return Box(f.left + x, f.top + y, side, side)
     }
 
     fun region(center: Vec2, objectSize: Double, unseenS: Double = 0.0): Box {
-        val h = sourceHeight.toDouble()
+        val f = frame()
+        val h = f.height
         val side = max(objectSize * config.sizeFactor, h * config.minSideFraction) + h * config.growthPerSFraction * unseenS
         val s = min(side, h)
-        val cx = center.x.coerceIn(s / 2, sourceWidth - s / 2)
-        val cy = center.y.coerceIn(s / 2, h - s / 2)
+        val cx = center.x.coerceIn(f.left + s / 2, f.right - s / 2)
+        val cy = center.y.coerceIn(f.top + s / 2, f.bottom - s / 2)
         return Box(cx, cy, s, s)
     }
+
+    private fun frame(): Box = view ?: Box(sourceWidth / 2.0, sourceHeight / 2.0, sourceWidth.toDouble(), sourceHeight.toDouble())
 
     fun reset() {
         runs = 0

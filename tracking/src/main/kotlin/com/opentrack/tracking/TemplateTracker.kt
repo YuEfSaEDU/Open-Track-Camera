@@ -57,6 +57,43 @@ class TemplateTracker(
         extract(frame, center.x.roundToInt(), center.y.roundToInt(), anchor)
     }
 
+    /**
+     * The analysis image changed scale by [k] (its px now cover 1/k as much, e.g. x2.6 on a
+     * switch to a telephoto analysed at its own resolution): resamples the templates so the
+     * track carries on. The new size is clamped like any template (its middle is kept).
+     */
+    fun rescale(k: Double) {
+        if (!isInitialized || k <= 0 || kotlin.math.abs(k - 1) < 1e-6) return
+        val nw = oddClamp(tw * k)
+        val nh = oddClamp(th * k)
+        template = resample(template, nw, nh, k)
+        anchor = resample(anchor, nw, nh, k)
+        tw = nw
+        th = nh
+    }
+
+    /** Bilinear resampling of a [tw] x [th] patch, scaled by [k] about its center, to [nw] x [nh]. */
+    private fun resample(src: FloatArray, nw: Int, nh: Int, k: Double): FloatArray {
+        val out = FloatArray(nw * nh)
+        var i = 0
+        for (row in 0 until nh) {
+            val y = ((row - nh / 2) / k + th / 2).coerceIn(0.0, th - 1.0)
+            val y0 = y.toInt().coerceAtMost(th - 2).coerceAtLeast(0)
+            val fy = (y - y0).toFloat()
+            val y1 = min(y0 + 1, th - 1)
+            for (col in 0 until nw) {
+                val x = ((col - nw / 2) / k + tw / 2).coerceIn(0.0, tw - 1.0)
+                val x0 = x.toInt().coerceAtMost(tw - 2).coerceAtLeast(0)
+                val fx = (x - x0).toFloat()
+                val x1 = min(x0 + 1, tw - 1)
+                val top = src[y0 * tw + x0] * (1 - fx) + src[y0 * tw + x1] * fx
+                val bottom = src[y1 * tw + x0] * (1 - fx) + src[y1 * tw + x1] * fx
+                out[i++] = top * (1 - fy) + bottom * fy
+            }
+        }
+        return out
+    }
+
     fun reset() {
         tw = 0
         th = 0

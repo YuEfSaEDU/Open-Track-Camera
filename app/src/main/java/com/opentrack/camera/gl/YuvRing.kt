@@ -4,6 +4,8 @@ import android.opengl.GLES20
 import android.opengl.GLES30
 import com.opentrack.tracking.Box
 import com.opentrack.tracking.CropWindow
+import com.opentrack.tracking.ZoomMap
+import com.opentrack.tracking.intersect
 import java.nio.FloatBuffer
 import kotlin.math.cos
 import kotlin.math.sin
@@ -32,7 +34,16 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
 
     class Slot(val yTex: Int, val uvTex: Int, val yFbo: Int, val uvFbo: Int) {
         var timestampNs = Long.MIN_VALUE
+        /** The stored region (reference px). */
         var capture: Box? = null
+        /** The part of [capture] with camera pixels (the rest is black: outside a telephoto frame). */
+        var valid: Box? = null
+        /** The frame's camera zoom ratio. */
+        var zoom = 1.0
+        /** The stored region in the camera frame (stream px): what [capture] really is once its mapping is known. */
+        var stream: Box? = null
+        /** False while the frame's zoom ratio was not known when it was stored (see [remap]). */
+        var exact = true
     }
 
     private val slots: Array<Slot> = Array(capacity) { createSlot() }
@@ -41,42 +52,87 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
 
     val bytes: Long get() = slots.size.toLong() * slotWidth * slotHeight * 3 / 2
 
-    /** Stores the current camera frame's [capture] region (source px) in the next slot. */
-    fun store(renderer: FrameRenderer, texture: Int, texMatrix: FloatArray, sourceW: Int, sourceH: Int, capture: Box, timestampNs: Long) {
+    /**
+     * Stores the current camera frame's [capture] region (reference px: the main lens at 1x) in
+     * the next slot; [map] places the frame, taken at some camera zoom ratio, in that space.
+     */
+    fun store(
+        renderer: FrameRenderer, texture: Int, texMatrix: FloatArray, sourceW: Int, sourceH: Int, capture: Box, timestampNs: Long,
+        map: ZoomMap = ZoomMap.identity(sourceW, sourceH),
+        /** Whether [map] is the frame's own (else [remap] it once known). */
+        exact: Boolean = true,
+    ) {
         val slot = slots[next]
         next = (next + 1) % slots.size
-        val l = (capture.left / sourceW).toFloat()
-        val t = (capture.top / sourceH).toFloat()
-        val w = (capture.width / sourceW).toFloat()
-        val h = (capture.height / sourceH).toFloat()
+        val s = map.toStream(capture)
+        val l = (s.left / sourceW).toFloat()
+        val t = (s.top / sourceH).toFloat()
+        val w = (s.width / sourceW).toFloat()
+        val h = (s.height / sourceH).toFloat()
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, slot.yFbo)
         GLES20.glViewport(0, 0, slotWidth, slotHeight)
-        renderer.drawLumaPlane(texture, texMatrix, l, t, w, h)
+        renderer.drawLumaPlane(texture, texMatrix, l, t, w, h, slotWidth, slotHeight, sourceW, sourceH)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, slot.uvFbo)
         GLES20.glViewport(0, 0, slotWidth / 2, slotHeight / 2)
         renderer.drawChromaPlane(texture, texMatrix, l, t, w, h, w / slotWidth, h / slotHeight)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         slot.timestampNs = timestampNs
         slot.capture = capture
+        slot.valid = if (map.zoom > 1.0) capture.intersect(map.visible) else capture
+        slot.zoom = map.zoom
+        slot.stream = s
+        slot.exact = exact
+    }
+
+    /**
+     * The frame's real mapping, known now (its capture result came after the frame was stored
+     * with the previous one): the stored pixels are the same camera region, which is this part of
+     * the reference space. Drawing then uses the exact region: a continuously zooming camera
+     * stays smooth instead of jumping by a step for a frame.
+     */
+    fun remap(slot: Slot, map: ZoomMap) {
+        val s = slot.stream ?: return
+        val capture = map.toRef(s)
+        slot.capture = capture
+        slot.valid = if (map.zoom > 1.0) capture.intersect(map.visible) else capture
+        slot.zoom = map.zoom
+        slot.exact = true
     }
 
     fun find(timestampNs: Long): Slot? = slots.firstOrNull { it.timestampNs == timestampNs }
 
     /**
      * Draws [crop] (source px, may be rotated) of the stored frame into the current viewport,
-     * undoing the rolling shutter distortion with [shutter] when given.
+     * undoing the rolling shutter distortion with [shutter] when given. [homography] (row-major,
+     * output-local source px → source px; see PerspectiveView) renders the crop as a virtual
+     * camera view; null draws the flat crop. [sharpen] (see [sharpenFor]) is the amount of
+     * luma sharpening.
      */
-    fun draw(slot: Slot, crop: CropWindow, shutter: ShutterCorrection? = null) {
+    fun draw(slot: Slot, crop: CropWindow, shutter: ShutterCorrection? = null, homography: DoubleArray? = null, sharpen: Float = 0f) {
         val cap = slot.capture ?: return
-        val c = cos(crop.rotation)
-        val s = sin(crop.rotation)
-        output.draw(
-            slot,
-            ((crop.cx - cap.left) / cap.width).toFloat(), ((crop.cy - cap.top) / cap.height).toFloat(),
-            (c * crop.width / cap.width).toFloat(), (s * crop.width / cap.height).toFloat(),
-            (-s * crop.height / cap.width).toFloat(), (c * crop.height / cap.height).toFloat(),
-            cap, shutter,
-        )
+        val h = homography ?: run {
+            val c = cos(crop.rotation)
+            val s = sin(crop.rotation)
+            doubleArrayOf(c, -s, crop.cx, s, c, crop.cy, 0.0, 0.0, 1.0)
+        }
+        // GLSL matrices are column-major.
+        for (r in 0 until 3) for (c in 0 until 3) hColumnMajor[c * 3 + r] = h[r * 3 + c].toFloat()
+        output.draw(slot, hColumnMajor, (crop.width / 2).toFloat(), (crop.height / 2).toFloat(), cap, shutter, 1f / slotWidth, 1f / slotHeight, sharpen)
+    }
+
+    private val hColumnMajor = FloatArray(9)
+
+    companion object {
+        /**
+         * Sharpening for an output that enlarges the source by [scale] (output px per source
+         * px): none when shrinking, growing with the enlargement (a 3x crop of the sensor is
+         * soft however well it is interpolated). Tuned in tools/shader_check/upscale.mjs.
+         */
+        fun sharpenFor(scale: Double): Float = (SHARPEN_BASE + SHARPEN_PER_SCALE * (scale - 1.0)).coerceIn(0.0, SHARPEN_MAX).toFloat()
+
+        const val SHARPEN_BASE = 0.0
+        const val SHARPEN_PER_SCALE = 0.5
+        const val SHARPEN_MAX = 1.0
     }
 
     fun release() {
@@ -110,14 +166,13 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
     }
 
-    /** YUV planes → RGB with an affine crop mapping (position, rotation, scale) in the vertex shader. */
+    /** YUV planes → RGB through a projective crop mapping (homography) to source px. */
     private class OutputProgram {
         private val quad: FloatBuffer = GlUtil.floatBuffer(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
         private val id = GlUtil.program(VERTEX, FRAGMENT)
         private val aPos = GLES20.glGetAttribLocation(id, "aPos")
-        private val uOrigin = GLES20.glGetUniformLocation(id, "uOrigin")
-        private val uAxisX = GLES20.glGetUniformLocation(id, "uAxisX")
-        private val uAxisY = GLES20.glGetUniformLocation(id, "uAxisY")
+        private val uH = GLES20.glGetUniformLocation(id, "uH")
+        private val uHalf = GLES20.glGetUniformLocation(id, "uHalf")
         private val sY = GLES20.glGetUniformLocation(id, "sY")
         private val sUv = GLES20.glGetUniformLocation(id, "sUV")
         private val uRsOn = GLES20.glGetUniformLocation(id, "uRsOn")
@@ -126,8 +181,10 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
         private val uCapSize = GLES20.glGetUniformLocation(id, "uCapSize")
         private val uCenter = GLES20.glGetUniformLocation(id, "uCenter")
         private val uReadout = GLES20.glGetUniformLocation(id, "uReadout")
+        private val uTexel = GLES20.glGetUniformLocation(id, "uTexel")
+        private val uSharp = GLES20.glGetUniformLocation(id, "uSharp")
 
-        fun draw(slot: Slot, ox: Float, oy: Float, axx: Float, axy: Float, ayx: Float, ayy: Float, cap: Box, shutter: ShutterCorrection?) {
+        fun draw(slot: Slot, h: FloatArray, halfW: Float, halfH: Float, cap: Box, shutter: ShutterCorrection?, texelW: Float, texelH: Float, sharpen: Float) {
             GLES20.glUseProgram(id)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, slot.yTex)
@@ -135,14 +192,15 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, slot.uvTex)
             GLES20.glUniform1i(sUv, 1)
-            GLES20.glUniform2f(uOrigin, ox, oy)
-            GLES20.glUniform2f(uAxisX, axx, axy)
-            GLES20.glUniform2f(uAxisY, ayx, ayy)
+            GLES20.glUniformMatrix3fv(uH, 1, false, h, 0)
+            GLES20.glUniform2f(uHalf, halfW, halfH)
+            GLES20.glUniform2f(uCapOrigin, cap.left.toFloat(), cap.top.toFloat())
+            GLES20.glUniform2f(uCapSize, cap.width.toFloat(), cap.height.toFloat())
             GLES20.glUniform1i(uRsOn, if (shutter != null) 1 else 0)
+            GLES20.glUniform2f(uTexel, texelW, texelH)
+            GLES20.glUniform1f(uSharp, sharpen)
             if (shutter != null) {
                 GLES20.glUniform3fv(uRs, ShutterCorrection.SAMPLES, shutter.samples, 0)
-                GLES20.glUniform2f(uCapOrigin, cap.left.toFloat(), cap.top.toFloat())
-                GLES20.glUniform2f(uCapSize, cap.width.toFloat(), cap.height.toFloat())
                 GLES20.glUniform2f(uCenter, shutter.centerX, shutter.centerY)
                 GLES20.glUniform3f(uReadout, shutter.dirX, shutter.dirY, shutter.extent)
             }
@@ -156,21 +214,20 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
         fun release() = GLES20.glDeleteProgram(id)
 
         private companion object {
-            // Output pixel u (x right, y down, relative to the output center) samples the slot at
-            // origin + u.x * axisX + u.y * axisY: the crop's center, rotation and size in slot units.
+            // Output pixel u (x right, y down, relative to the output center, in source px)
+            // samples the source at H (u, 1): the crop's center, rotation and size, and with a
+            // perspective homography the virtual camera view (projective, so divided per pixel).
             const val VERTEX = """
                 attribute vec2 aPos;
-                uniform vec2 uOrigin;
-                uniform vec2 uAxisX;
-                uniform vec2 uAxisY;
-                varying highp vec2 vSlot;
+                uniform mat3 uH;
+                uniform vec2 uHalf;
+                varying highp vec3 vSrc;
                 void main() {
                     gl_Position = vec4(aPos, 0.0, 1.0);
-                    vec2 u = vec2(aPos.x * 0.5, -aPos.y * 0.5);
-                    vSlot = uOrigin + uAxisX * u.x + uAxisY * u.y;
+                    vSrc = uH * vec3(aPos.x * uHalf.x, -aPos.y * uHalf.y, 1.0);
                 }
             """
-            // Rolling shutter: vSlot is where a point sits in the ideal (global shutter) frame; the
+            // Rolling shutter: p is where a point sits in the ideal (global shutter) frame; the
             // sensor recorded it shifted and turned by the camera motion at its row's readout
             // time. The rigid correction is interpolated from 9 samples along the readout.
             const val FRAGMENT = """
@@ -183,9 +240,28 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
                 uniform vec2 uCapSize;
                 uniform vec2 uCenter;
                 uniform vec3 uReadout;
-                varying highp vec2 vSlot;
-                vec2 unshutter(vec2 slot) {
-                    vec2 p = uCapOrigin + slot * uCapSize;
+                uniform vec2 uTexel;
+                uniform float uSharp;
+                varying highp vec3 vSrc;
+                // Catmull-Rom bicubic luma from 9 bilinear taps: the slot is drawn about 1:1,
+                // where bilinear would soften every frame by its sub-pixel offset.
+                float lumaBicubic(vec2 at) {
+                    vec2 s = at / uTexel;
+                    vec2 t1 = floor(s - 0.5) + 0.5;
+                    vec2 f = s - t1;
+                    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+                    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+                    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+                    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+                    vec2 w12 = w1 + w2;
+                    vec2 a = (t1 - 1.0) * uTexel;
+                    vec2 b = (t1 + w2 / w12) * uTexel;
+                    vec2 c = (t1 + 2.0) * uTexel;
+                    return (texture2D(sY, vec2(a.x, a.y)).r * w0.x + texture2D(sY, vec2(b.x, a.y)).r * w12.x + texture2D(sY, vec2(c.x, a.y)).r * w3.x) * w0.y
+                         + (texture2D(sY, vec2(a.x, b.y)).r * w0.x + texture2D(sY, vec2(b.x, b.y)).r * w12.x + texture2D(sY, vec2(c.x, b.y)).r * w3.x) * w12.y
+                         + (texture2D(sY, vec2(a.x, c.y)).r * w0.x + texture2D(sY, vec2(b.x, c.y)).r * w12.x + texture2D(sY, vec2(c.x, c.y)).r * w3.x) * w3.y;
+                }
+                vec2 unshutter(vec2 p) {
                     float f = clamp(dot(p - uCenter, uReadout.xy) / uReadout.z + 0.5, 0.0, 1.0) * 8.0;
                     vec3 r = uRs[0];
                     for (int i = 0; i < 8; i++) {
@@ -194,12 +270,24 @@ class YuvRing(val slotWidth: Int, val slotHeight: Int, capacity: Int) {
                     vec2 d = p - uCenter;
                     float c = cos(r.z);
                     float s = sin(r.z);
-                    vec2 raw = uCenter + vec2(c * d.x - s * d.y, s * d.x + c * d.y) + r.xy;
-                    return (raw - uCapOrigin) / uCapSize;
+                    return uCenter + vec2(c * d.x - s * d.y, s * d.x + c * d.y) + r.xy;
                 }
                 void main() {
-                    vec2 at = uRsOn == 1 ? unshutter(vSlot) : vSlot;
-                    float y = texture2D(sY, at).r;
+                    vec2 p = vSrc.xy / vSrc.z;
+                    if (uRsOn == 1) p = unshutter(p);
+                    vec2 at = (p - uCapOrigin) / uCapSize;
+                    float y = lumaBicubic(at);
+                    if (uSharp > 0.0) {
+                        // Unsharp mask against the 4 neighbours, limited to their range (no halos).
+                        float n = texture2D(sY, at - vec2(0.0, uTexel.y)).r;
+                        float so = texture2D(sY, at + vec2(0.0, uTexel.y)).r;
+                        float e = texture2D(sY, at + vec2(uTexel.x, 0.0)).r;
+                        float w = texture2D(sY, at - vec2(uTexel.x, 0.0)).r;
+                        float lo = min(min(min(n, so), min(e, w)), y);
+                        float hi = max(max(max(n, so), max(e, w)), y);
+                        y = clamp(y + uSharp * (y - 0.25 * (n + so + e + w)), lo, hi);
+                    }
+                    y = clamp(y, 0.0, 1.0);
                     vec2 c = texture2D(sUV, at).rg - 0.5;
                     gl_FragColor = vec4(y + 1.402 * c.y, y - 0.344136 * c.x - 0.714136 * c.y, y + 1.772 * c.x, 1.0);
                 }

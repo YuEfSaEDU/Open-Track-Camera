@@ -91,15 +91,28 @@
                 android:textColor="#FFFFFF"
                 android:textSize="12sp" />
 
+            <Button android:id="@+id/share" style="@style/ControlToggle" android:text="@string/share" />
+            <Button android:id="@+id/processVideo" style="@style/ControlToggle" />
             <Button android:id="@+id/viewMode" style="@style/ControlToggle" />
             <Button android:id="@+id/autoLock" style="@style/ControlToggle" />
             <Button android:id="@+id/autoZoom" style="@style/ControlToggle" />
             <Button android:id="@+id/stabilizer" style="@style/ControlToggle" />
             <Button android:id="@+id/horizon" style="@style/ControlToggle" />
             <Button android:id="@+id/releaseTarget" style="@style/ControlToggle" android:text="@string/release_target" />
+            <Button android:id="@+id/targetType" style="@style/ControlToggle" />
             <Button android:id="@+id/detector" style="@style/ControlToggle" />
+            <Button android:id="@+id/model" style="@style/ControlToggle" />
             <Button android:id="@+id/focus" style="@style/ControlToggle" />
+            <Button android:id="@+id/ois" style="@style/ControlToggle" />
             <Button android:id="@+id/shutter" style="@style/ControlToggle" />
+            <Button android:id="@+id/lens" style="@style/ControlToggle" />
+            <Button android:id="@+id/hybrid" style="@style/ControlToggle" />
+            <Button android:id="@+id/resolution" style="@style/ControlToggle" />
+            <Button android:id="@+id/outputRes" style="@style/ControlToggle" />
+            <Button android:id="@+id/codec" style="@style/ControlToggle" />
+            <Button android:id="@+id/vendorUnlock" style="@style/ControlToggle" />
+            <Button android:id="@+id/telemetry" style="@style/ControlToggle" />
+            <Button android:id="@+id/cameraReport" style="@style/ControlToggle" android:text="@string/camera_report" />
         </LinearLayout>
     </ScrollView>
 </FrameLayout>

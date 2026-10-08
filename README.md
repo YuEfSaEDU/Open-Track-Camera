@@ -19,14 +19,19 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
 ## Özellikler (v0.1)
 
 - **4K60 → 1080p60 kırpma**: 2x kırpma yakınlaştırmasında piksel kaybı yok (1:1). Kırpma zumu
-  1x–4x ayarlanabilir; lens zumu (`CONTROL_ZOOM_RATIO`) ile telefoto kameraya geçilebilir.
+  1x–4x ayarlanabilir; kamera zumu (`CONTROL_ZOOM_RATIO`) ayrıca ayarlanabilir (bazı telefonlarda
+  belli bir oranın üstünde telefoto kameraya geçer; günlükteki odak uzaklığı bunu gösterir).
 - **Hibrit hedef tespiti**
-  - Sinir ağı: MediaPipe EfficientDet-Lite0 (COCO `airplane` sınıfı), ~10 Hz, asenkron.
+  - Sinir ağı: uygulamanın **kendi modeli** (`tools/detector`, uçak / helikopter / drone / kuş,
+    384 px, float16) ~10 Hz, asenkron. "Model" düğmesiyle eski COCO EfficientDet-Lite0'a geçilir;
+    "Hedef: tüm araçlar" (araba, tekne…) COCO'yu kullanır.
   - Gökyüzü dedektörü: düz gökyüzünde birkaç piksellik uzak uçakları bulan klasik yöntem
     (yerel arka plan farkı + sakin ve parlak halka testi). Sinir ağının göremediği küçük hedefler için.
   - **Yakınlaştırılmış tespit**: hedef varken sinir ağı çoğunlukla hedefin çevresine (4K'da ~1:1)
     bakar, hedef yokken kareyi karolarla tarar. Gökyüzü dedektörünün bulduğu her şey sinir ağıyla
-    **doğrulanır**; tanınmayan (kalabalık, deniz, duman) takip bırakılır.
+    **doğrulanır**; tanınmayan (kalabalık, deniz, duman) takip bırakılır. Onaylanana kadar kadraj
+    ve zum hedefe dönmez (bulut kenarı, yer lekesi görüntüyü oynatmaz).
+  - **Yumuşak kilitlenme**: kadraj hedefe ~0.8 s'de süzülerek geçer, tek karede atlamaz.
 - **60 fps takip**: NCC şablon eşleme (alt-piksel), sabit hız Kalman filtresi, kaybolunca tahminle
   devam (coasting) ve tespitlerle yeniden yakalama.
 - **İleriye bakan stabilizasyon** (DaVinci Resolve'un yaklaşımının gerçek zamanlı hali):
@@ -35,14 +40,51 @@ jiroskopla iptal eden hareketli bir kırpma (crop) penceresiyle **1080p60** vide
   (hız/ivme/sarsıntı cezası, kırpma ve hedef kısıtları). Kayma ve **roll (ufuk)** birlikte düzeltilir.
   Geçmiş kareler GPU'da YUV halka tamponda tutulur. Hedef yokken normal EIS gibi çalışır.
   Ön ayarlar: uçağa kilit / hızlı / dengeli / sinematik.
+- **Perspektif doğru kırpma**: hedef sensörün kenarına kaydığında görüntü düz kesilmez, o yöne
+  dönmüş sanal bir kameranın görüntüsü olarak çizilir. Geniş açılı lensin kenarındaki uzama ve
+  yamukluk çıkışa taşınmaz.
 - **Rolling shutter düzeltmesi**: jiroskopla her satırın okunma anındaki kamera pozu hesaplanır;
   pan'daki eğilme ve titremedeki "jöle" etkisi kayıtta GPU'da düzeltilir.
 - **Uçak fotoğrafçılığı ayarları**: sonsuza sabit odak (gökyüzünde AF aramasını önler), EV,
-  hızlı enstantane (≈1/1000 s, ISO otomatik türetilir), OIS açık / kamera EIS kapalı.
+  enstantane önceliği (oto, 1/250–1/2000 s; varsayılan 1/500) — ISO, kameranın otomatik pozlamasının
+  parlaklığını koruyacak şekilde sürekli ayarlanır; stabilize kırpmada kare içi hareket bulanıklığını önler.
+  Seçilen enstantane tercih edilen değerdir: ISO en altta (ör. 100) olduğu halde görüntü hâlâ parlaksa
+  enstantane kısalır (1/1000, 1/2000…); karanlıkta ISO 800'e varınca (gürültü) enstantane kare
+  süresinin yarısına kadar uzar (60 fps'te 1/120), ancak ondan sonra ISO yükselmeye devam eder.
+  Hedef parlaklık, kameranın otomatik pozlaması oturduktan sonra öğrenilir (oturmazsa orta gri) ve
+  **EV kaydırıcısıyla −3…+3 (1/3 adım)** kaydırılır; enstantane "oto" iken EV kameranın pozlama
+  telafisidir. Kamera EIS kapalı; **OIS varsayılan kapalı** (jiroskop stabilizasyonu kameranın tüm
+  dönüşünü düzeltir; OIS'in lensle düzelttiği kısım tekrar düzeltilince titreme ters yönde geri gelir).
+  "OIS" düğmesiyle açılıp karşılaştırılabilir.
+  Parlaklık **kaydedilen kırpmada** ölçülür (kayda girmeyen yer/güneş etkilemez), kilitli hedef
+  ağırlıklıdır (parlak gökte uçak siluet kalmaz); kırpmanın parlak ucu patlıyorsa pozlama en fazla
+  1 durak düşürülür. **Enstantane: akıllı** seçeneğinde süre, hedefin (hedef yoksa sahnenin)
+  sensörde kayma hızından seçilir: çıkışta ~1.5 pikselden fazla bulanıklık olmayacak kadar kısa,
+  gerisinde olabildiğince uzun (1/4000 – 1/120 s), daha az ISO gürültüsü için.
 - **Otomatik zoom**: kullanıcının belirlediği min/max sınırlar içinde hedefi çıkışta sabit boyutta
   tutar; hedef yalnızca tahminle izlenirken veya kadrajın kenarına kayarken genişler, hedef yokken
   en geniş sınıra döner (yeniden yakalamak için). Ölü bölge ve hız sınırlarıyla "nefes alma" yapmaz.
-- **Kayıt**: donanım H.264 (isteğe bağlı HEVC) 40 Mbps + AAC ses, `Movies/OpenTrack` klasörüne.
+- **Galeriden işleme**: telefonun kendi kamerasıyla çekilmiş bir video (ör. üreticinin yalnızca kendi
+  uygulamasına açtığı 4K60) seçilir; takip, ileriye bakan stabilizasyon ve otomatik zoom aynı şekilde
+  uygulanır, 1080p sonuç ve orijinal ses `Movies/OpenTrack` klasörüne yazılır. Kamera hareketi
+  görüntüden kestirilir (kayıtlı videoda jiroskop yok).
+- **Kayıt**: donanım kodlayıcı + AAC ses, `Movies/OpenTrack` klasörüne. **Codec: H.264 / HEVC /
+  HEVC 10-bit** (10-bit: GPU çıkışı RGBA 1010102, kodlayıcı Main10; gökyüzü geçişlerinde bantlanma
+  azalır; kamera akışı 8-bit SDR kalır). Telefon seçileni o boyutta kodlayamıyorsa HEVC'ye, o da
+  olmazsa H.264'e düşer ve bunu söyler. **Paylaş** düğmesi son kaydı Android paylaşım menüsüyle
+  (Instagram, WhatsApp… galeriden yükleme gibi) gönderir. **Çıkış:
+  1080p (40 Mbps) veya 1440p (60 Mbps)**: 1440p, kırpma 2560 pikselden genişken (4K'da ≤1.5x zum)
+  kaynağın gerçek detayını tutar; YouTube 1440p yüklemeye de daha iyi sıkıştırma verir.
+- **Büyütme kalitesi**: kırpma bikübik (Catmull-Rom) ölçeklenir, küçültürken 2x2 örnekle (titreşmez),
+  büyütme oranına göre hale yapmayan keskinleştirme uygulanır. Gerçek 4K karelerde bilineere göre
+  +1.5–4 dB (`tools/shader_check/upscale.mjs`).
+- **Kayıt günlüğü (telemetri)**: her kaydın yanına `Download/OpenTrack/OTC_….jsonl` yazılır: kare
+  kare kamera ayarları (enstantane, ISO, odak uzaklığı, lens), pozlama döngüsünün kararları, tespitler,
+  takip durumu, canlı ve kaydedilen kırpma — her biri videodaki zamanıyla. "Günlük" düğmesiyle
+  kapatılabilir; özet için `python3 tools/telemetry/summarize.py OTC_….jsonl --events`.
+- **Lens seçimi**: "Lens" düğmesi telefonun arka lensleri arasında geçer (ana, geniş açı, tele).
+  Telefonun diğer uygulamalara listelemediği lensler de "(gizli)" olarak denenir; açılmazsa ana lense
+  dönülür. Kamera raporunda "Arka lensler" satırı hangi lenslerin görüldüğünü gösterir.
 - **Arayüz**: Geniş görünüm (tüm sensör + kırpma çerçevesi) / Çıkış görünümü (kaydedilen görüntü),
   dokunarak hedef seçme, otomatik kilit.
 

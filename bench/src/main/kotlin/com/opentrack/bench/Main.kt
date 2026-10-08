@@ -6,6 +6,7 @@ import com.opentrack.tracking.CropWindow
 import com.opentrack.tracking.Detection
 import com.opentrack.tracking.DetectionPlanner
 import com.opentrack.tracking.DetectionSource
+import com.opentrack.tracking.FramingConfig
 import com.opentrack.tracking.FramingController
 import com.opentrack.tracking.LookaheadFramer
 import com.opentrack.tracking.LumaFrame
@@ -77,7 +78,7 @@ fun main(args: Array<String>) {
     a.opt("min-anchor")?.let { trackerConfig = trackerConfig.copy(minAnchorScore = it.toDouble()) }
     if (a.flag("image-search")) trackerConfig = trackerConfig.copy(imageSpaceSearch = true)
     val tracker = TargetTracker(motion, trackerConfig)
-    val framing = FramingController(srcW, srcH, outW.toDouble() / outH, motion)
+    val framing = FramingController(srcW, srcH, outW.toDouble() / outH, motion, FramingConfig(acquireS = a.double("acquire-s", FramingConfig().acquireS)))
     framing.zoom = a.double("zoom", FramingController.nativeZoom(srcW, outW))
     if (a.flag("auto-zoom")) {
         framing.zoomConfig = ZoomConfig(
@@ -102,6 +103,7 @@ fun main(args: Array<String>) {
         robustGoalScale = a.double("robust-goal", StabilizerConfig().robustGoalScale),
         targetWeight = a.double("target-weight", StabilizerConfig().targetWeight),
         lockToPoint = a.flag("lock"),
+        acquireS = a.double("acquire-s", StabilizerConfig().acquireS),
     )
     val framer = LookaheadFramer(srcW, srcH, motion, stabConfig)
     val captureMargin = a.double("capture-margin", 1.25)
@@ -116,7 +118,9 @@ fun main(args: Array<String>) {
     fun write(frameIndex: Int, crop: CropWindow, trackAt: TrackPrediction?) {
         val fi = info.remove(frameIndex) ?: return
         val t = frameIndex * frameNs
-        val tgt = if (trackAt != null && trackAt.hasTarget) motion.poseAt(t).toImage(trackAt.worldAt(t), center) else null
+        // The tracker's own position (framing may ignore a tentative lock, see forFraming).
+        val src = if (trackAt != null && trackAt.hasTarget) trackAt else fi.pred
+        val tgt = if (src.hasTarget) motion.poseAt(t).toImage(src.worldAt(t), center) else null
         val hadTarget = fi.state == TrackState.TRACKING || fi.state == TrackState.COASTING
         out.println(
             String.format(
@@ -173,6 +177,8 @@ fun main(args: Array<String>) {
             pending++
         }
         roiResults.removeAll { d -> (d.timestampNs + latencyNs <= t).also { if (it && neuralEnabled) dets += d } }
+        // Simulates a detector that fails on the device: runs are reported, results never arrive.
+        if (a.flag("neural-fails")) dets.removeAll { it.source == DetectionSource.NEURAL }
         val runs = ArrayList<NeuralRun>()
         pendingRuns.removeAll { r -> (r.timestampNs + latencyNs <= t).also { if (it && neuralEnabled) runs += r } }
         val nNeural = dets.size
@@ -188,17 +194,19 @@ fun main(args: Array<String>) {
         } else null
 
         // Render thread: causal crop (zoom + capture window), then the delayed stabilized crop.
-        val causal = framing.update(t, p)
+        val noGate = a.flag("no-framing-gate")
+        val framed = if (noGate) p else p.forFraming()
+        val causal = framing.update(t, framed)
         val m = tracker.lastMatch
         info[frame] = FrameInfo(
             p.state, p.width, p.height, framing.zoom, p.confidence, ms, nNeural, dets.size - nNeural,
             m?.score ?: 0.0, m?.anchorScore ?: 0.0, m?.contrast ?: 0.0, m?.contrastRatio ?: 0.0, tracker.lastEvent, step?.reliable ?: false,
-            step?.shift?.x ?: 0.0, step?.shift?.y ?: 0.0, step?.rotation ?: 0.0, step?.features ?: 0, step?.inliers ?: 0,
+            step?.shift?.x ?: 0.0, step?.shift?.y ?: 0.0, step?.rotation ?: 0.0, step?.features ?: 0, step?.inliers ?: 0, p,
         )
         if (useLookahead) {
             val capture = if (captureMargin > 0) Box(causal.cx, causal.cy, causal.width * captureMargin, causal.height * captureMargin) else null
             framer.addFrame(t, causal.width, causal.height, capture)
-            framer.updateTrack(p)
+            framer.updateTrack(framed)
             framer.emit()?.let { o -> write((o.timestampNs / frameNs).toInt(), o.crop, o.track) }
         } else {
             write(frame, causal, p)
@@ -230,6 +238,7 @@ private class FrameInfo(
     val state: TrackState, val tw: Double, val th: Double, val zoom: Double, val conf: Double, val ms: Double,
     val nNeural: Int, val nSky: Int, val score: Double, val anchor: Double, val contrast: Double, val contrastRatio: Double,
     val event: String, val reliable: Boolean, val estDx: Double, val estDy: Double, val estRot: Double, val estFeatures: Int, val estInliers: Int,
+    val pred: TrackPrediction,
 )
 
 private fun loadDetections(file: File, frameNs: Long): List<Detection> =

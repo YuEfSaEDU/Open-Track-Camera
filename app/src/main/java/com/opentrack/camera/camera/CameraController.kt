@@ -2,6 +2,8 @@ package com.opentrack.camera.camera
 
 import android.annotation.SuppressLint
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
@@ -10,19 +12,32 @@ import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import com.opentrack.camera.diag.Telemetry
+import com.opentrack.tracking.SceneMetering
+import com.opentrack.tracking.ShutterPriorityExposure
+import com.opentrack.tracking.SmartShutter
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * Camera2 wrapper with a single output (the render pipeline's SurfaceTexture). All camera
  * work happens on a private handler thread.
  */
-class CameraController(private val manager: CameraManager, val profile: CameraProfile) {
+class CameraController(
+    private val manager: CameraManager,
+    val profile: CameraProfile,
+    /** Experimental: send Honor's vendor keys (see [VendorKeys]). */
+    private val vendorExperiment: Boolean = false,
+) {
 
     interface Listener {
         /** Per-frame metadata useful for motion compensation (all in ns). */
@@ -31,6 +46,9 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
     }
 
     var listener: Listener? = null
+
+    /** While recording: per-frame camera settings and exposure loop decisions go here. */
+    @Volatile var telemetry: Telemetry? = null
 
     private val thread = HandlerThread("camera").apply { start() }
     private val handler = Handler(thread.looper)
@@ -43,10 +61,25 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
     // Last auto-exposure values, used to derive ISO for shutter priority.
     @Volatile private var lastAutoExposureNs = 0L
     @Volatile private var lastAutoIso = 0
+    /** The latest automatic exposure frame was settled (converged or locked). */
+    @Volatile private var aeSettled = false
+    /** When automatic exposure was first requested (elapsed realtime ns), 0 = not yet. */
+    private var autoSinceNs = 0L
 
     @SuppressLint("MissingPermission")
     fun open(target: Surface) {
         surface = target
+        // A camera the maker keeps for its own app (e.g. a lens only reachable by id) throws here.
+        try {
+            openDevice(target)
+        } catch (e: Exception) {
+            Log.e(TAG, "openCamera failed", e)
+            listener?.onError("camera ${profile.cameraId} could not be opened: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun openDevice(target: Surface) {
         manager.openCamera(profile.cameraId, executor, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
                 device = camera
@@ -66,10 +99,22 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
         })
     }
 
+    private val characteristics by lazy { manager.getCameraCharacteristics(profile.cameraId) }
+
     private fun createSession(camera: CameraDevice, target: Surface) {
+        val output = OutputConfiguration(target).apply {
+            if (!profile.highSpeed) {
+                profile.physicalCameraId?.let { setPhysicalCameraId(it) }
+                // Declare the stream as video recording: some HALs only offer their video sensor
+                // modes (e.g. 4K60) to streams with this use case.
+                if (Build.VERSION.SDK_INT >= 33 && profile.supportsStreamUseCase) {
+                    streamUseCase = CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_VIDEO_RECORD.toLong()
+                }
+            }
+        }
         val config = SessionConfiguration(
-            SessionConfiguration.SESSION_REGULAR,
-            listOf(OutputConfiguration(target)),
+            if (profile.highSpeed) SessionConfiguration.SESSION_HIGH_SPEED else SessionConfiguration.SESSION_REGULAR,
+            listOf(output),
             executor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
@@ -82,12 +127,68 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
                 }
             },
         )
-        camera.createCaptureSession(config)
+        // The frame rate range is a session parameter on many HALs: the sensor mode is picked when
+        // the session is configured, so pass it up front, not only in the repeating request.
+        runCatching {
+            config.sessionParameters = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, profile.fpsRange)
+                if (vendorExperiment) Log.i(TAG, "vendor session keys: " + VendorKeys.apply(this, characteristics))
+            }.build()
+        }.onFailure { Log.w(TAG, "session parameters rejected", it) }
+        try {
+            camera.createCaptureSession(config)
+        } catch (e: Exception) {
+            Log.e(TAG, "createCaptureSession failed", e)
+            listener?.onError("session failed for ${profile.label}: ${e.message ?: e.javaClass.simpleName}")
+        }
     }
 
     fun update(newSettings: CameraSettings) {
         handler.post { applySettings(newSettings) }
     }
+
+    /**
+     * Hybrid zoom moves to the lens [physicalId], which gets [lightFactor] times the light of the
+     * current one (aperture): in shutter priority ISO / time follow in the same request as the
+     * zoom ratio, and metering ignores frames of the old lens still on their way.
+     */
+    fun updateForLens(newSettings: CameraSettings, physicalId: String?, lightFactor: Double) {
+        handler.post {
+            if (manualActive && lightFactor > 0 && kotlin.math.abs(lightFactor - 1) > 0.02) ae?.compensate(lightFactor)
+            expectedLens = physicalId
+            expectedSinceNs = SystemClock.elapsedRealtimeNanos()
+            applySettings(newSettings)
+        }
+    }
+
+    /**
+     * The camera moved to another physical lens on its own (its switch point, not one hybrid
+     * zoom announced with [updateForLens]): shutter priority follows the aperture difference.
+     */
+    private fun onLensChanged(from: String, to: String) {
+        if (to == expectedLens && SystemClock.elapsedRealtimeNanos() - expectedSinceNs < 1_500_000_000L) return
+        if (!manualActive) return
+        val factor = light(to) / light(from)
+        if (kotlin.math.abs(factor - 1) <= 0.02) return
+        ae?.compensate(factor)
+        expectedLens = to
+        expectedSinceNs = SystemClock.elapsedRealtimeNanos()
+        applySettings(settings)
+    }
+
+    /** Light a physical lens lets in (1 / f-number²), 1 when unknown. */
+    private fun light(id: String): Double {
+        val n = apertures.getOrPut(id) {
+            runCatching { manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull()?.toDouble() }.getOrNull() ?: 0.0
+        }
+        return if (n > 0) 1 / (n * n) else 1.0
+    }
+
+    private val apertures = HashMap<String, Double>()
+
+    /** The lens hybrid zoom asked for; metering frames of another lens are skipped (handler thread). */
+    private var expectedLens: String? = null
+    private var expectedSinceNs = 0L
 
     private fun applySettings(s: CameraSettings) {
         settings = s
@@ -101,7 +202,10 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
         // Our own crop-based stabilization needs the full, unwarped sensor stream.
         b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
         if (profile.hasOis) {
-            b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+            b.set(
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                if (s.ois) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF,
+            )
         }
         b.set(CaptureRequest.CONTROL_ZOOM_RATIO, s.zoomRatio.coerceIn(profile.zoomRange.lower, profile.zoomRange.upper))
 
@@ -112,27 +216,159 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
         }
 
+        if (vendorExperiment) VendorKeys.apply(b, characteristics)
+
         val exp = profile.exposureRangeNs
         val iso = profile.isoRange
-        if (s.shutterPriority && profile.supportsManualSensor && exp != null && iso != null && lastAutoExposureNs > 0) {
-            val shutter = s.shutterNs.coerceIn(exp.lower, minOf(exp.upper, 1_000_000_000L / profile.fps))
-            val derivedIso = (lastAutoIso.toDouble() * lastAutoExposureNs / shutter).toInt().coerceIn(iso.lower, iso.upper)
+        // Shutter priority, once auto exposure has shown how bright the scene should be.
+        // High-speed sessions only honor automatic exposure (and 1/120 s is short already).
+        val manual = !profile.highSpeed && wantsShutterPriority(s) && exp != null && iso != null && ae != null &&
+            lastAutoExposureNs > 0 && ae.ready
+        ae?.ev = s.evThirds / 3.0
+        if (manual && exp != null) {
+            // In the dark the time may grow to half the frame interval (1/120 s at 60 fps).
+            val halfFrame = minOf(exp.upper, 1_000_000_000L / (2L * profile.fps))
+            if (!manualActive || s.shutterNs != manualShutterNs) {
+                val shutter = if (s.shutterNs == CameraSettings.SHUTTER_SMART) {
+                    // Starts at 1/500 s; then follows the motion (onSceneLuma).
+                    smart = SmartShutter(maxOf(exp.lower, SMART_SHORTEST_NS), maxOf(exp.lower, halfFrame)).also { it.reset(2_000_000L) }
+                    smart!!.ns
+                } else {
+                    smart = null
+                    s.shutterNs.coerceIn(exp.lower, minOf(exp.upper, 1_000_000_000L / profile.fps))
+                }
+                ae!!.start(lastAutoIso, lastAutoExposureNs, shutter, maxOf(shutter, halfFrame))
+            }
+            manualActive = true
+            manualShutterNs = s.shutterNs
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
-            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, shutter)
-            b.set(CaptureRequest.SENSOR_SENSITIVITY, derivedIso)
+            // See ShutterPriorityExposure: the chosen time is preferred; shorter in bright light
+            // at minimum ISO, longer in the dark once ISO reaches its noise limit.
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, ae!!.exposureNs)
+            b.set(CaptureRequest.SENSOR_SENSITIVITY, ae.iso)
             b.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / profile.fps)
         } else {
+            manualActive = false
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
-            b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, s.aeCompensation.coerceIn(profile.aeCompensationRange.lower, profile.aeCompensationRange.upper))
+            if (autoSinceNs == 0L) autoSinceNs = SystemClock.elapsedRealtimeNanos()
+            // While auto exposure only teaches shutter priority its brightness, keep it neutral
+            // (the user's EV is applied on top of what it learns); otherwise it is the EV.
+            val steps = if (wantsShutterPriority(s) && !profile.highSpeed) 0 else (s.evThirds / 3.0 / profile.aeCompensationStep).roundToInt()
+            b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, steps.coerceIn(profile.aeCompensationRange.lower, profile.aeCompensationRange.upper))
             b.set(CaptureRequest.CONTROL_AE_LOCK, s.aeLock)
         }
 
         try {
-            ses.setSingleRepeatingRequest(b.build(), executor, captureCallback)
+            if (ses is CameraConstrainedHighSpeedCaptureSession) {
+                // Frames come in bursts (e.g. 4 per request at 120 fps).
+                ses.setRepeatingBurstRequests(ses.createHighSpeedRequestList(b.build()), executor, captureCallback)
+            } else {
+                ses.setSingleRepeatingRequest(b.build(), executor, captureCallback)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "setRepeatingRequest failed", e)
             listener?.onError(e.message ?: "repeating request failed")
         }
+    }
+
+    /** The smart shutter while it is selected and shutter priority runs. */
+    private var smart: SmartShutter? = null
+
+    private val ae = profile.isoRange?.let { ShutterPriorityExposure(it.lower, it.upper, minExposureNs = profile.exposureRangeNs?.lower ?: 1_000L) }
+    private var manualActive = false
+    private var manualShutterNs = 0L
+
+    /** Actual exposure time (ns) and ISO of the latest frame, for the status line. */
+    @Volatile var lastExposureNs = 0L
+        private set
+    @Volatile var lastIso = 0
+        private set
+
+    private fun wantsShutterPriority(s: CameraSettings) = s.shutterNs != 0L && profile.supportsManualSensor
+
+    /**
+     * Metering of an analysis frame (~10 Hz) taken at [timestampNs] (see
+     * [com.opentrack.tracking.ExposureMeter]). Teaches the auto exposure brightness, or drives
+     * ISO / exposure time in shutter priority, judged against the settings that frame was
+     * actually taken with. [blurLimitNs] steers the smart shutter.
+     */
+    fun onSceneLuma(metering: SceneMetering, timestampNs: Long, blurLimitNs: Long?) = handler.post {
+        val e = ae ?: return@post
+        val mean = metering.mean
+        if (manualActive) {
+            val shot = shotSettings(timestampNs) ?: return@post
+            // A frame of the lens being left: it was right for that lens, not for the new one.
+            // (Only for a while: should the camera stay on another lens, metering must go on.)
+            val want = expectedLens?.takeIf { SystemClock.elapsedRealtimeNanos() - expectedSinceNs < 1_500_000_000L }
+            if (want != null) {
+                val lensOfFrame = physicalAt(timestampNs)
+                if (lensOfFrame != null && lensOfFrame != want) return@post
+            }
+            val s = smart
+            val moved = s != null && e.setPreferred(s.update(blurLimitNs))
+            val changed = e.update(mean, shot.second, shot.first, metering.highlight)
+            telemetry?.line("ae")?.i("ts", timestampNs)?.s("mode", "manual")?.n("luma", mean)?.n("hl", metering.highlight, 0)?.n("aim", e.aimLuma)
+                ?.i("frameExp", shot.first)?.i("frameIso", shot.second)?.i("exp", e.exposureNs)?.i("iso", e.iso)
+                ?.let { l -> if (s != null) l.n("blurMs", blurLimitNs?.let { it / 1e6 }, 3).n("prefMs", s.ns / 1e6, 3) else l }
+                ?.b("changed", changed || moved)?.send()
+            if (changed || moved) applySettings(settings)
+        } else {
+            telemetry?.line("ae")?.i("ts", timestampNs)?.s("mode", "auto")?.n("luma", mean)?.b("settled", aeSettled)
+                ?.n("target", e.targetLuma)?.i("obs", e.observations)?.b("ready", e.ready)?.send()
+            // Learn only from settled auto exposure: right after the camera opens the frames are
+            // far too dark, and taking over from those made the whole recording dark.
+            // (Only while its compensation is neutral, i.e. shutter priority is wanted: with the
+            // shutter on auto it applies the user's EV, which would then count twice.)
+            if (wantsShutterPriority(settings) && !profile.highSpeed && lastAutoExposureNs > 0) {
+                if (aeSettled) e.observeAuto(mean)
+                if (!e.ready && autoSinceNs > 0 && SystemClock.elapsedRealtimeNanos() - autoSinceNs > AE_SETTLE_TIMEOUT_NS) e.useDefaultTarget()
+                if (e.ready) applySettings(settings)
+            }
+        }
+    }
+
+    // Exposure time and ISO of recent frames by sensor timestamp (capture results arrive on the
+    // camera executor; read on the camera handler).
+    private val shotTs = LongArray(SHOT_HISTORY)
+    private val shotExposure = LongArray(SHOT_HISTORY)
+    private val shotIso = IntArray(SHOT_HISTORY)
+    private var shotNext = 0
+    private val shotLock = Any()
+
+    // Zoom ratio of recent frames by sensor timestamp (the render thread maps each frame by it).
+    private val zoomTs = LongArray(SHOT_HISTORY)
+    private val zoomRatio = FloatArray(SHOT_HISTORY)
+    private val zoomPhysical = arrayOfNulls<String>(SHOT_HISTORY)
+    private var zoomNext = 0
+
+    /** The physical lens of a multi-camera the latest frame came from (null if not reported). */
+    @Volatile var activePhysicalId: String? = null
+        private set
+
+    /** The zoom ratio the frame of [timestampNs] was taken with, once its capture result is in. */
+    fun zoomAt(timestampNs: Long): Double? = synchronized(shotLock) {
+        for (k in 0 until SHOT_HISTORY) if (zoomTs[k] == timestampNs && zoomRatio[k] > 0f) return zoomRatio[k].toDouble()
+        null
+    }
+
+    /** The physical lens (multi-camera) the frame of [timestampNs] came from, if reported. */
+    fun physicalAt(timestampNs: Long): String? = synchronized(shotLock) {
+        for (k in 0 until SHOT_HISTORY) if (zoomTs[k] == timestampNs) return zoomPhysical[k]
+        null
+    }
+
+    private fun shotSettings(timestampNs: Long): Pair<Long, Int>? = synchronized(shotLock) {
+        // The frame itself, or failing that the closest one within 20 ms; if the clocks do not
+        // match at all, the latest result (a few frames off, still far better than nothing).
+        var best = -1
+        var bestDt = 20_000_000L
+        for (k in 0 until SHOT_HISTORY) {
+            if (shotExposure[k] <= 0) continue
+            val dt = abs(shotTs[k] - timestampNs)
+            if (dt <= bestDt) { bestDt = dt; best = k }
+        }
+        if (best < 0) best = (shotNext - 1 + SHOT_HISTORY) % SHOT_HISTORY
+        if (shotExposure[best] <= 0 || shotIso[best] <= 0) null else shotExposure[best] to shotIso[best]
     }
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -140,9 +376,47 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
             val ts = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
             val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
             val skew = result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW) ?: 0L
+            lastExposureNs = exposure
+            lastIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: lastIso
+            synchronized(shotLock) {
+                shotTs[shotNext] = ts
+                shotExposure[shotNext] = exposure
+                shotIso[shotNext] = lastIso
+                shotNext = (shotNext + 1) % SHOT_HISTORY
+                zoomTs[zoomNext] = ts
+                // The ratio the frame was taken with; a HAL that does not report it did what was asked.
+                zoomRatio[zoomNext] = result.get(CaptureResult.CONTROL_ZOOM_RATIO) ?: result.request.get(CaptureRequest.CONTROL_ZOOM_RATIO) ?: 1f
+                zoomPhysical[zoomNext] = result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)
+                zoomNext = (zoomNext + 1) % SHOT_HISTORY
+            }
+            result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { id ->
+                val before = activePhysicalId
+                activePhysicalId = id
+                if (before != null && before != id) handler.post { onLensChanged(before, id) }
+            }
             if (result.get(CaptureResult.CONTROL_AE_MODE) != CameraMetadata.CONTROL_AE_MODE_OFF) {
+                aeSettled = when (result.get(CaptureResult.CONTROL_AE_STATE)) {
+                    CameraMetadata.CONTROL_AE_STATE_CONVERGED, CameraMetadata.CONTROL_AE_STATE_LOCKED, CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED -> true
+                    else -> false
+                }
                 lastAutoExposureNs = exposure
                 lastAutoIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: lastAutoIso
+            }
+            telemetry?.let { t ->
+                val line = t.line("cam").i("ts", ts).i("exp", exposure).i("iso", lastIso)
+                    .i("dur", result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: 0L)
+                    .n("fl", (result.get(CaptureResult.LENS_FOCAL_LENGTH) ?: 0f).toDouble(), 2)
+                    .n("zoom", (result.get(CaptureResult.CONTROL_ZOOM_RATIO) ?: 0f).toDouble(), 2)
+                    .i("aeMode", result.get(CaptureResult.CONTROL_AE_MODE) ?: -1)
+                    .i("aeState", result.get(CaptureResult.CONTROL_AE_STATE) ?: -1)
+                    .i("afState", result.get(CaptureResult.CONTROL_AF_STATE) ?: -1)
+                    .n("focus", (result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: -1f).toDouble(), 2)
+                    .i("skew", skew)
+                    .i("ois", result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE) ?: -1)
+                    .i("dist", result.get(CaptureResult.DISTORTION_CORRECTION_MODE) ?: -1)
+                // Which physical lens a multi-camera actually streams from (it may switch with zoom).
+                result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { line.s("phys", it) }
+                line.send()
             }
             listener?.onFrameMetadata(ts, exposure, skew)
         }
@@ -164,5 +438,14 @@ class CameraController(private val manager: CameraManager, val profile: CameraPr
 
     private companion object {
         const val TAG = "CameraController"
+
+        /** Without a settled auto exposure report by then, shutter priority aims for middle grey. */
+        const val AE_SETTLE_TIMEOUT_NS = 3_000_000_000L
+
+        /** Capture results remembered for matching analysis frames (~0.5 s at 60 fps). */
+        const val SHOT_HISTORY = 32
+
+        /** The smart shutter's shortest time (1/4000 s): shorter only for the brightness. */
+        const val SMART_SHORTEST_NS = 250_000L
     }
 }

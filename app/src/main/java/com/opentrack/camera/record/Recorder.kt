@@ -2,8 +2,6 @@ package com.opentrack.camera.record
 
 import android.content.ContentResolver
 import android.content.ContentValues
-import android.media.MediaCodecList
-import android.media.MediaFormat
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
@@ -13,12 +11,22 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Video bit rate for an output whose long side is [longSide] px at up to 60 fps: 1440p gets
+ * more (sky gradients and fine detail at 1.8x the pixels of 1080p).
+ */
+fun bitrateFor(longSide: Int): Int = when {
+    longSide >= 2560 -> 60_000_000
+    longSide >= 1920 -> 40_000_000
+    else -> 16_000_000
+}
+
 data class RecordingConfig(
     val width: Int = 1920,
     val height: Int = 1080,
     val fps: Int = 60,
     val bitrate: Int = 40_000_000,
-    val preferHevc: Boolean = false,
+    val codec: VideoCodec = VideoCodec.AVC,
     val audio: Boolean = true,
 )
 
@@ -36,12 +44,18 @@ class Recorder(private val resolver: ContentResolver) {
 
     val isRecording: Boolean get() = video != null
 
+    /** File name of the recording without extension (e.g. OTC_20261001_110059), once started. */
+    var baseName: String? = null
+        private set
+
     /**
      * @param cameraTimestampRealtime whether camera timestamps are CLOCK_BOOTTIME based
      *   (SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME); they are converted to CLOCK_MONOTONIC.
      */
     fun start(config: RecordingConfig, cameraTimestampRealtime: Boolean, audioAllowed: Boolean): VideoEncoder {
-        val name = "OTC_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+        val base = "OTC_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        baseName = base
+        val name = "$base.mp4"
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, name)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
@@ -57,8 +71,8 @@ class Recorder(private val resolver: ContentResolver) {
         val s = MuxerSink(fd.fileDescriptor, wantAudio)
         sink = s
         val offsetNs = if (cameraTimestampRealtime) System.nanoTime() - SystemClock.elapsedRealtimeNanos() else 0L
-        val mime = if (config.preferHevc && hasEncoder(MediaFormat.MIMETYPE_VIDEO_HEVC)) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
-        val v = VideoEncoder(config.width, config.height, config.fps, config.bitrate, mime, s, offsetNs)
+        val codec = VideoCodec.pick(config.codec, config.width, config.height, config.fps)
+        val v = VideoEncoder(config.width, config.height, config.fps, config.bitrate, codec, s, offsetNs)
         video = v
         if (wantAudio) {
             val a = AudioEncoder(s)
@@ -92,9 +106,4 @@ class Recorder(private val resolver: ContentResolver) {
         resolver.update(u, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
         return u
     }
-
-    private fun hasEncoder(mime: String): Boolean =
-        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
-            info.isEncoder && info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
-        }
 }

@@ -1,6 +1,7 @@
 package com.opentrack.tracking
 
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import kotlin.math.abs
 import kotlin.math.sin
@@ -65,7 +66,7 @@ class LookaheadFramerTest {
             return TrackPrediction(TrackState.TRACKING, t, pos, Vec2(150.0, 0.0), 60.0, 30.0, 1.0)
         }
         fun targetInOutput(delay: Int): Pair<Double, Double> {
-            val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = delay))
+            val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = delay, acquireS = 0.0))
             val out = run(f, 400) { track(it) }
             val truth = out.map { o -> val s = o.timestampNs * 1e-9; Vec2(1500 + 150 * s, 1000 + 80 * sin(s * 2)) }
             val path = out.map { it.crop.center }
@@ -97,7 +98,7 @@ class LookaheadFramerTest {
             measuredWorld = truth(t),
         )
         fun maxOffset(lock: Boolean): Double {
-            val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 20, lockToPoint = lock, targetWeight = 20.0))
+            val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 20, lockToPoint = lock, targetWeight = 20.0, acquireS = 0.0))
             val out = run(f, 240) { track(it) }
             return out.subList(30, 210).maxOf { o -> o.crop.toLocal(truth(o.timestampNs)).length() }
         }
@@ -114,9 +115,51 @@ class LookaheadFramerTest {
         fun track(t: Long) = TrackPrediction(
             TrackState.TRACKING, t, point(t), Vec2(200.0, 0.0), 80.0, 40.0, 1.0, measuredWorld = point(t), centerOffset = toCenter,
         )
-        val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 20, lockToPoint = true, targetWeight = 20.0))
+        val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 20, lockToPoint = true, targetWeight = 20.0, acquireS = 0.0))
         val out = run(f, 240) { track(it) }
         val worst = out.subList(30, 210).maxOf { o -> o.crop.toLocal(point(o.timestampNs) + toCenter).length() }
         assertTrue("aircraft center off by $worst px", worst < 10.0)
+    }
+
+    @Test
+    fun glidesOntoANewLockInsteadOfJumping() {
+        // Stabilization only, then a confirmed lock on an aircraft ~1000 px from the center.
+        val target = Vec2(2700.0, 1450.0)
+        fun maxStep(acquireS: Double): Pair<Double, Double> {
+            val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 20, targetWeight = 20.0, maxTargetOffset = 0.3, acquireS = acquireS))
+            val out = run(f, 240) { t ->
+                if (t < 60 * frameNs) TrackPrediction.IDLE.copy(timestampNs = t)
+                else TrackPrediction(TrackState.TRACKING, t, target, Vec2.ZERO, 60.0, 30.0, 1.0, measuredWorld = target)
+            }
+            val steps = out.zipWithNext { a, b -> (b.crop.center - a.crop.center).length() }
+            return steps.max() to (out.last().crop.center - target).length()
+        }
+        val (snap, _) = maxStep(0.0)
+        val (glide, end) = maxStep(0.8)
+        assertTrue("glide step $glide px vs snap $snap px", glide < snap / 2 && glide < 40.0)
+        assertTrue("ended $end px from the target", end < 10.0)
+    }
+
+    @Test
+    fun cropSizeStepIsEasedWithoutLagOrPixelsItDoesNotHave() {
+        val f = LookaheadFramer(3840, 2160, CameraMotion.NONE, StabilizerConfig(delayFrames = 30))
+        val ns = 16_666_667L
+        val outs = ArrayList<LookaheadFramer.Output>()
+        val stepAt = 60
+        for (i in 0 until 180) {
+            val t = i * ns
+            val w = if (i < stepAt) 1920.0 else 960.0
+            f.addFrame(t, w, w * 9 / 16, Box(1920.0, 1080.0, w * 1.25, w * 1.25 * 9 / 16))
+            f.updateTrack(TrackPrediction.IDLE.copy(timestampNs = t))
+            f.emit()?.let { outs += it }
+        }
+        val widths = outs.associate { (it.timestampNs / ns).toInt() to it.crop.width }
+        // Eased: no single frame jumps by the whole step; it starts before the step (zero lag)
+        // but never wider than the frame's capture window (1.25 x its own crop).
+        val steps = (1 until 140).mapNotNull { k -> widths[k]?.let { a -> widths[k - 1]?.let { b -> abs(a - b) } } }
+        assertTrue("largest step ${steps.max()}", steps.max() < 960.0 * 0.2)
+        assertTrue("eases in before the step: ${widths[stepAt - 2]}", widths[stepAt - 2]!! < 1920.0)
+        for ((k, w) in widths) assertTrue("frame $k width $w", w <= (if (k < stepAt) 1920.0 else 960.0) * 1.25 + 1e-6)
+        assertEquals(960.0, widths[stepAt + 40]!!, 1e-6)
     }
 }

@@ -37,7 +37,12 @@ class OverlayView @JvmOverloads constructor(context: Context, attrs: AttributeSe
     private val trackPaint = stroke(Color.rgb(60, 230, 90), 2.5f)
     private val coastPaint = stroke(Color.rgb(255, 200, 40), 2.5f)
     private val neuralPaint = stroke(Color.rgb(80, 200, 255), 1.2f)
-    private val blobPaint = stroke(Color.rgb(255, 80, 220), 1.2f)
+    // Sky-blob candidates are only candidates: drawn faint, so they do not read as "aircraft".
+    private val blobPaint = stroke(Color.argb(90, 255, 80, 220), 1f)
+    /** A tentative lock (not yet confirmed as an aircraft): dashed, and not framed. */
+    private val tentativePaint = stroke(Color.argb(200, 255, 255, 255), 1.5f).apply {
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(6f, 6f), 0f)
+    }
     private val reticlePaint = stroke(Color.argb(160, 255, 255, 255), 1f)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -83,7 +88,11 @@ class OverlayView @JvmOverloads constructor(context: Context, attrs: AttributeSe
             val minHalf = 10 * density
             if (rect.width() < 2 * minHalf) rect.inset(rect.width() / 2 - minHalf, 0f)
             if (rect.height() < 2 * minHalf) rect.inset(0f, rect.height() / 2 - minHalf)
-            val p = if (s.trackState == TrackState.TRACKING) trackPaint else coastPaint
+            val p = when {
+                !s.targetConfirmed -> tentativePaint
+                s.trackState == TrackState.TRACKING -> trackPaint
+                else -> coastPaint
+            }
             drawCorners(canvas, rect, p)
         }
     }

@@ -138,9 +138,8 @@ class SkyBlobDetector(
             val cy = wy / wSum
             val size = max(bw, bh).toDouble()
             val score = (peak / (threshold + 3 * ringStd)).coerceAtMost(4.0) / 4.0
-            val s = frame.scale
             out += Detection(
-                box = Box(cx * s, cy * s, max(bw.toDouble(), 3.0) * s, max(bh.toDouble(), 3.0) * s),
+                box = frame.toSource(Box(cx, cy, max(bw.toDouble(), 3.0), max(bh.toDouble(), 3.0))),
                 score = score.toFloat(),
                 label = if (size <= 4) "dot" else "object",
                 source = DetectionSource.SKY_BLOB,

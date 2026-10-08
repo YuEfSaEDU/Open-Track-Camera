@@ -5,7 +5,7 @@
 ```
                    ┌──────────── camera thread ────────────┐
  Camera2 (4K60) ──►│ TEMPLATE_RECORD, fps [60,60], ∞ odak, │
-                   │ OIS açık, kamera EIS kapalı           │
+                   │ OIS kapalı*, kamera EIS kapalı         │
                    └───────────────┬───────────────────────┘
                                    │ SurfaceTexture (OES doku)
             ┌──────────────────────▼──────────── render thread (GL) ──────────────────────────┐
@@ -111,6 +111,30 @@ kaydı birkaç kare geciktirir.
      (gerçek GLSL kodu, başsız Chromium WebGL2'de sentetik rolling-shutter karesinde çalıştırılır:
      ortalama luma hatası düzeltmesiz 0.053 → düzeltmeli 0.003, yeniden örnekleme tabanı).
 
+8. **Perspektif doğru kırpma (`PerspectiveView`).** Telefonun ana kamerası geniş açılıdır
+   (~70°) ve doğrusal (rectilinear) izdüşüm yapar: eksenden uzakta her şey yarıçap yönünde
+   1/cos² kadar uzar ve yamuklaşır. Kilitli hedef telefon dönerken sensörün kenarına kayınca düz
+   (2B) kırpma bu değişen uzamayı çıkışa taşır: sahne, perspektifle bükülen bir fotoğraf gibi
+   görünür. Kullanıcı kaydında ölçülen: arka plan konumu sabitken kenarlar arası %8 yamukluk,
+   %6 uzama ve 3° kayma; model bunu kırpmanın merkezden ~600 px (telefon ~13° dönmüş) uzak
+   olmasıyla birebir açıklıyor.
+   - Çözüm: her çıkış karesi, kırpma merkezinin ışınına dönmüş sanal bir kameranın görüntüsü
+     olarak çizilir (H = K·R·K⁻¹; kamera kendi merkezi etrafında dönerken uzak sahne için kesin).
+     Hedef, kameranın tam karşısındaymış gibi görünür. Merkezde düz kırpmayla aynıdır.
+   - Shader: tepe noktalarında homojen kaynak koordinatı, piksel başına bölme (projektif);
+     rolling shutter düzeltmesi bunun üstüne kaynak piksellerde uygulanır.
+   - Eksen dışı görüntünün dış tarafı daha çok kaynak piksel ister (600 px'te %19, 900 px'te %36).
+     Yakalama penceresi o tarafa (marj kadar) kaydırılır. Sığmayan yerde (sensör kenarı)
+     düzeltme gereken kadar azalır ve yavaşça geri gelir (kare başına %2), şekil aniden değişmez.
+   - Odak uzaklığı `CameraProfile.focalPx × zoomRatio` (jiroskop modeliyle aynı). `focalPx`, kamera
+     bildiriyorsa fabrika kalibrasyonundan (`LENS_INTRINSIC_CALIBRATION` fx) gelir; yoksa mm odak / sensör
+     genişliği tahmininden. Tahmin birkaç % saparsa jiroskop düzeltmesi ve perspektif o kadar kayar
+     (kalan titreme, bükülme); kamera raporu iki değeri yan yana gösterir. Galeriden
+     işlemede kapalı: videonun hangi lensle çekildiği bilinmiyor.
+   - Doğrulama: `PerspectiveViewTest` (eksen dışı hedef, karşıdan bakan kameranın görüntüsüyle
+     0.01 px altında aynı; düz kırpma 30 px'ten fazla sapıyor) ve `tools/shader_check`
+     (perspektif homografi ile ortalama luma hatası 0.003; düz okunsa 0.096).
+
 Ön ayarlar: *uçağa kilit* (0.33 s, kilit), *hızlı* (0.2 s, yumuşaklık 0.4), *dengeli* (0.33 s, 0.6),
 *sinematik* (0.5 s, 0.8).
 Önizlemede "çıkış" görünümü kaydedilen (gecikmeli, stabilize) görüntüyü gösterir.
@@ -124,9 +148,17 @@ Kırpma zumu, kullanıcının belirlediği `[minZoom, maxZoom]` aralığında ke
 - **Güvenlik için genişleme**: takipçi yalnızca tahmin ediyorsa (COASTING) saniyede ~%45, hedef kırpma
   merkezinden yarı-boyutun %30'undan fazla uzaklaşırsa ayrıca genişler. Hedef yoksa en geniş sınıra
   döner; böylece yeniden yakalama kolaylaşır.
-- **Nefes almayı önleme**: log-uzayında çalışır, ±%12 ölü bölge ve histerezis vardır; zoom-in en fazla
-  0.45 ln/s, zoom-out 1.2 ln/s (hedefi kaçırmak gevşek kadrajdan daha kötüdür).
-- Lens zumu (telefoto geçişi) otomatik değildir: fiziksel kamera değişimi kayıtta sıçrama yapar.
+- **Nefes almayı önleme**: log-uzayında çalışır, ±%12 ölü bölge ve histerezis vardır.
+- **Yumuşak hareket (`SmoothZoom`)**: zoom hızı da ivmesi de sınırlı; zoom yavaşça hızlanır, hedefe
+  yaklaşırken tam o noktada duracak şekilde erkenden yavaşlar (aşmadan), sonu üstel yaklaşır.
+  Zoom-in en fazla 0.3 ln/s ve 0.35 ln/s², zoom-out 0.9 ln/s ve 1.2 ln/s² (hedefi kaçırmak gevşek
+  kadrajdan daha kötüdür); son yaklaşma 1.2 s / 0.6 s. Elle kırpma zoomu da aynı şekilde süzülür
+  (daha çabuk, 0.35 s), kaydırıcı sıçratmaz.
+- **İleriye bakan yumuşatma**: gecikmeli çıkışta kırpma boyutu look-ahead penceresinde log-uzayında
+  Gauss (σ 0.2 s) ile yumuşatılır (`StabilizerConfig.zoomSmoothS`); gecikmesiz olduğu için zoom
+  istendiği andan biraz önce başlar. Kare kendi kayıt penceresinden büyük olamaz.
+- Lens geçişi (hibrit zoom) kırpmayı değiştirmez: referans uzayda aynı kırpma, yalnız piksel kaynağı
+  değişir (aşağıda).
 - `nativeZoom` (4K→1080p için 2x) üstü dijital büyütmedir; arayüz bu değerleri ⚠ ile işaretler.
 
 ## Tespit ve takip
@@ -181,6 +213,36 @@ yanlış hedeflere kilitlenebiliyordu ve bunu düzeltecek bir şey yoktu.
 - **Tahmin modunda hız sönümü**: ölçüm yokken hız 0.5 s zaman sabitiyle azalır; buluta giren uçak
   kadrajı düz bir çizgide kare dışına sürüklemez.
 
+### Kesinleşmemiş kilit kadrajlanmaz, kilitlenme yumuşak (`TrackPrediction.framable`, `acquireS`)
+
+Kullanıcı testlerinde (iç mekân, bulutlu gökyüzü) gökyüzü dedektörü bulut kenarlarına, yerdeki
+lekelere, kalabalığa kilitleniyor; doğrulama onları birkaç saniyede bırakıyordu ama o sürede kadraj
+ve zum yanlış hedefe gidiyordu.
+
+- **Kadraj kapısı**: takipçi her hedefi izler ama kadraj (kırpma, otomatik zum) ancak hedef
+  sinir ağıyla onaylanınca, kullanıcı seçince ya da onaylanamayacak kadar küçük olup gökyüzünde uçak
+  gibi ilerlediğinde (4K'da ≥ 60 px/s; bulut ve leke ilerlemez) hedefe döner. O zamana kadar
+  `forFraming()` boş tahmin verir ve görüntü normal EIS gibi geniş kalır. Ekranda onaysız hedef kesik
+  çizgili "aday" kutusu, ham blob'lar soluk dairelerdir.
+- **Yumuşak kilitlenme**: hedefe geçiş anında olmaz. 0→1 "bağlanma" değeri 0.8 s'de (smoothstep)
+  yükselir; hedef kaybolunca 1 s'de söner (kısa kayıpta kaldığı yerden devam eder). Ara
+  değerlerde hedef, EIS hedefi (karenin dünyadaki merkezi) ile uçak arasında karışık, ağırlığı ve
+  yay sertliği (canlı önizleme) kademeli büyür. Hedefi merkezde tutan sınır, kilit anındaki
+  uzaklıktan başlar ve yalnızca daralır: kadraj tek karede çekilmez ama uçak da dışarı kaçamaz.
+  Hedef bir karede sıçrarsa (başka bir nesneye geçiş, ya da takibin yeniden tohumlanıp kayması) süzülme baştan başlar. Testler: tek karedeki en
+  büyük kayma, anında kilide göre yarıdan az.
+
+### Hedef türü ve dedektör modu
+
+- **Hedef** düğmesi: *hava araçları* (COCO `airplane`; helikopterler genelde bu sınıfta çıkar) veya
+  *tüm araçlar* (+ araba, kamyon, otobüs, motosiklet, tren, tekne). Sinir ağı yalnızca seçilen
+  sınıflarla kurulur; hava aracı modunda başka bir sınıfın kutusu bir uçak kutusunu bastıramaz.
+- **Dedektör** düğmesi: hibrit (varsayılan) / sinir ağı / gökyüzü. Sadece sinir ağı ölçüldü
+  (bağımsız referansla): SOLOTÜRK'te hedefte 0.85 → 0.64, kaçırılan 0.05 → 0.30 (uzak F-16'lar
+  sinir ağına birkaç piksel); yanlış hedef 0.10 → 0.07. Eski sette hedefte 0.82 → 0.78, yanlış
+  0.16 → 0.10. Kayıp kazançtan büyük olduğu için varsayılan hibrit kaldı; gökyüzü lekeleri zaten
+  yalnızca kilit adayıdır, kadraj ve zum sinir ağı onayıyla hedefe döner.
+
 ### Gökyüzü dedektörü (`SkyBlobDetector`)
 
 Uzaktaki bir uçak 4K karede birkaç piksel olabilir; 640x360'a (ve modelin 320x320 girişine)
@@ -199,6 +261,84 @@ küçültülünce sinir ağı onu göremez. Oysa düz gökyüzünde çok belirgi
 GPU tarafındaki 3x3 kutu filtre, 6x küçültmede tek piksellik hedeflerin örnekleme aralığına düşüp
 kaybolmasını engeller.
 
+## Galeriden işleme (`VideoProcessor`)
+
+Bazı üreticiler (ör. Honor 200 Pro) diğer uygulamalara normal oturumda en fazla 30 fps veriyor;
+4K60 yalnızca kendi kamera uygulamalarında var (kamera raporu: tüm akışlar @30, yalnızca 1080p
+yüksek hız modu 120/240). Çözüm: kendi kamerayla 4K60 çek, sonra uygulamada işle.
+
+- `MediaExtractor` + `MediaCodec` çözücü → `SurfaceTexture` (OES); canlı hattaki parçalar aynen:
+  luma geri okuma, `VisualMotionEstimator`, `DetectionPlanner` ile yakınlaştırılmış sinir ağı tespiti,
+  `TargetTracker`, `FramingController`, `YuvRing`, `LookaheadFramer` → enkoder.
+- Her kare işlenir (canlıdaki gibi atlanmaz), tespitler aynı kareye uygulanır (gecikme yok).
+- Video döndürme bilgisi (`rotation`) `FrameRenderer` dönüşüyle uygulanır. Ses izi kopyalanır.
+- Sinir ağı tek bir iş parçacığında (`DetectorHost`), **CPU** delegesiyle çalışır: paketlenen
+  int8 EfficientDet-Lite0 MediaPipe GPU delegesinde desteklenmiyor (Honor 200 Pro'da
+  "ToTensorConverter: input data size does not match" hatası ve zayıf takip). Başarısız bir
+  çalışma takipçiye bildirilmez ("uçak yok" sayılmaz).
+- İşlenen her video için `Download/OpenTrack/…_islenmis.csv` takip kaydı yazılır (tezgâhın CSV
+  biçiminde: durum, hedef, kırpma, zoom, olay, sinir ağı kutuları), telefon sonucu tezgâhla kare kare
+  karşılaştırılabilsin diye.
+- Jiroskop yok: rolling shutter düzeltmesi yapılmaz; telefonun kendi stabilizasyonu kapalı
+  çekilmiş videolar en iyi sonucu verir. Gerçek video testlerindeki ölçümler bu durumu temsil eder.
+
+## OIS
+
+Jiroskop stabilizasyonu, görüntünün kameranın ölçülen dönüşü kadar kaydığını varsayar
+(`GyroMotionModel`). OIS açıkken lens titremenin bir kısmını optik olarak zaten giderir; jiroskop
+bunu görmez, düzeltme o kısmı ters yönde görüntüye geri ekler (küçük el titremesi kayıtta kalır,
+rolling shutter düzeltmesi de yanlış olur). Bu yüzden OIS varsayılan kapalı (`CameraSettings.ois`).
+Kısa enstantanede OIS'in bulanıklığa katkısı zaten küçük; akıllı enstantane jiroskop hızını dikkate
+alır. Günlükteki `cam.ois` HAL'in isteği uygulayıp uygulamadığını, kamera raporu OIS ve OIS kayma
+verisi (`STATISTICS_OIS_DATA_MODE`) desteğini gösterir; kayma verisi varsa ileride OIS açıkken
+düzeltmeden çıkarılabilir.
+
+## Pozlama (`ShutterPriorityExposure`, `ExposureMeter`, `SmartShutter`)
+
+- **Enstantane önceliği**: Camera2 otomatik pozlamanın süresini sınırlayamadığı için pozlama
+  uygulamada sürülür. Kameranın kendi AE'si oturunca hedef parlaklık öğrenilir (oturmazsa orta gri),
+  EV kaydırıcısı bunu kaydırır; her ölçüm karenin gerçek ISO/süresiyle değerlendirilir. Toplam pozlama
+  dört aşamada bölünür: ISO en altta ve hâlâ parlak → süre kısalır; tercih edilen süre, ISO 800'e kadar;
+  ISO 800'de süre 1/(2·fps)'e kadar uzar; sonra ISO yükselir.
+- **Ölçüm kaydedilen kırpmada** (`ExposureMeter`): bütün sensör karesi değil, canlı kırpmanın
+  bölgesi ölçülür (2-3x zumda karenin çoğu — yer, güneş, parlak bulut — kayda girmez). Kadrajlanan
+  bir hedef varsa kutusu ortalamanın yarısına kadar ağırlık alır (64 analiz pikselinden küçük hedef
+  orantılı olarak daha az): parlak gökte uçak siluet kalmaz.
+- **Parlak alan koruması**: kırpmanın %98 dilimi (`highlight`) patlıyorsa (≥254) pozlama adım adım
+  düşer, patlamıyorsa 245'te tutulur; ama parlaklık hedefinin en fazla 1 durak altına iner (güneşli
+  bir bulut yüzünden bütün görüntü kararmaz).
+- **Akıllı enstantane** (`SmartShutter`): tercih edilen süre, konunun sensörde ne hızla kaydığından
+  seçilir: çıkışta en fazla ~1.5 piksel bulanıklık. Konu, kadrajlanan hedefin kendisidir (pan
+  sırasında arka planın bulanıklaşması istenen bir şeydir); hedef yoksa kırpmanın altındaki sahne
+  (el titremesi, jiroskoptan). Hız 50 ms'lik poz farkından ölçülür; süre 1/4000 ile 1/(2·fps)
+  arasında, hızlanınca çabuk kısalır, sakinleşince yavaş uzar (pompalama yok). Toplam pozlama aynı
+  kalır, yalnız ISO/süre bölüşümü değişir.
+
+## Ölçekleme ve çıkış çözünürlüğü
+
+Kırpma iki kez örneklenir: kameradan halkaya (yakalama penceresi çıkış çözünürlüğünde saklanır;
+zum sensör çözünürlüğünü aşınca büyütme burada olur) ve halkadan çıkışa (~1:1, döndürme ve
+perspektifle). İkisi de bilineerdi; yumuşaklık birikiyordu.
+
+- **Saklama** (`PLANE_Y_FRAGMENT`): büyütürken ve ~1:1'de Catmull-Rom bikübik (kaynak piksel ızgarasında
+  9 bilineer örnek), 1.25x'ten fazla küçültürken 2x2 süper örnekleme (ince detay titreşmez).
+- **Çıkış** (`YuvRing` FRAGMENT): luma bikübik; ardından 4 komşuya karşı keskinleştirme, komşuların
+  min/max aralığına sıkıştırılır (hale yok). Miktar `sharpenFor(ölçek) = 0.5·(ölçek − 1)`, küçültmede 0.
+  Renk (chroma) bilineer kalır.
+- **Ölçüm** (`tools/shader_check/upscale.mjs`, uygulamanın GLSL'i Chromium WebGL2'de): 4K kareler 1.5/2/3
+  kat küçültülmüş "sensörden" büyütülüp gerçek 4K ile karşılaştırılır; küçültme alan filtreli gerçeğe.
+
+  | | bilineer | bikübik | bikübik + keskinleştirme |
+  |---|---|---|---|
+  | 1.5x büyütme | 36.6–44.7 dB | +1.6–2.6 dB | +1.8–3.3 dB |
+  | 2x büyütme | 34.7–42.9 dB | +2.1–3.2 dB | +2.5–4.1 dB |
+  | 3x büyütme | 30.7–40.4 dB | +1.5–2.7 dB | +1.9–3.8 dB |
+  | 0.625x küçültme | 46.6–47.5 dB | +0.4–0.75 dB | (keskinleştirme zararlı → 0) |
+
+  Seçilen miktar her büyütme oranında en iyi PSNR'a denk geliyor.
+- **Çıkış çözünürlüğü**: 4K sınıfı kaynakta 1080p veya 1440p (`Çıkış` düğmesi; galeri işleme de uyar).
+  1440p: halka ~200 MB (1080p ~110 MB), 60 Mbps.
+
 ## Kayıt
 
 - Enkoder yüzeyi aynı EGL bağlamına (`EGL_RECORDABLE_ANDROID`) bağlanır; her kare
@@ -206,6 +346,145 @@ kaybolmasını engeller.
 - `MuxerSink` tüm izlerin formatı gelene kadar örnekleri tamponlar (ilk anahtar kare kaybolmaz),
   zamanları `CLOCK_MONOTONIC`'e çevirip ilk video karesine göre sıfırlar.
 - Dosya `MediaStore` üzerinden `Movies/OpenTrack/OTC_yyyyMMdd_HHmmss.mp4` olarak yazılır.
+- Codec (`VideoCodec`): H.264, HEVC veya HEVC 10-bit (Main10). 10-bit'te `EglCore` RGBA 1010102
+  (10/10/10/2 tam eşleşen, kaydedilebilir) bir yapılandırma seçer; boru hattının tüm yüzeyleri onu
+  kullanır, kodlayıcı girişine 10-bit RGB gider. Halka ve kamera akışı 8-bit kalır: kazanç, kodlayıcının
+  düz gökyüzünde 8 bitte yaptığı bantlanmanın ve GPU'nun ara değerlerinin (bikübik, keskinleştirme)
+  korunmasından gelir. Gerçek 10-bit yakalama Android'de HDR (HLG10) demektir; ayrı bir iş.
+  Renk tanımı BT.709 SDR, sınırlı aralık. `VideoCodec.pick` seçileni boyut/kare hızı ve Main10
+  desteğine göre doğrular, olmazsa HEVC → H.264'e düşer.
+
+### Kayıt günlüğü (`Telemetry`)
+
+Kayıt sürerken (ayar açıksa) `Download/OpenTrack/OTC_yyyyMMdd_HHmmss.jsonl` dosyasına satır başına bir
+JSON nesnesi yazılır. Satırlar çağıran thread'de kurulur, ayrı bir thread'de yazılır; yazıcı geride
+kalırsa satır atılır ve sayılır (kamera ve render thread'leri hiç beklemez). `ts` kamera zaman
+damgasıdır (ns); `rt` her zaman `elapsedRealtime`.
+
+| `k` | Kaynak | Alanlar |
+|---|---|---|
+| `start` | kayıt başı | video adı, sürüm, cihaz, profil, kamera / fiziksel kimlik, lens, kaynak boyutu, fps, `focalPx`, sensör ve ekran yönü, çıkış boyutu, jiroskop, OIS, rolling shutter süresi, `tsRealtime` |
+| `set` | ayar değişince | enstantane, EV, odak, kamera zumu, stabilizasyon, ufuk, zum sınırları, dedektör, hedef türü, otomatik kilit, görünüm |
+| `cam` | her kare (capture result) | `exp`, `iso`, `dur`, `fl` (odak uzaklığı, mm), `zoom`, AE/AF durumları, `focus`, `skew`, `phys` (çok kameralıda etkin lens) |
+| `ae` | pozlama döngüsü (~10 Hz) | `manual`: ölçülen ve hedef parlaklık, karenin gerçek ayarları, yeni ayarlar; `auto`: öğrenilen hedef, oturma |
+| `nn` | her sinir ağı çalışması | süre, sonuç sayısı, yakınlaştırılmış bölge (`roi`) |
+| `trk` | her analiz karesi | durum, hedef kutusu (o karenin görüntüsünde), hız, güven, `framable`, ölçüldü mü, son ölçümün yaşı, verilen tespitler `[etiket, skor, cx, cy, w, h, kaynak]` |
+| `live` | her kare | canlı (nedensel) kırpma, zum, jiroskop pozu (kayma + roll), durum |
+| `out` | her kaydedilen kare | `t` (videodaki zaman, s), kırpma, roll, perspektif gücü, hedefin o karedeki yeri |
+| `end` | kayıt sonu | atılan satır sayısı |
+
+`tools/telemetry/summarize.py` kare aralıklarını, pozlamayı (parlaklığın hedeften sapması), lens
+değişimlerini, takip durumlarını ve kaydedilen kırpmanın en büyük sıçramalarını videodaki zamanlarıyla
+özetler.
+
+### Lens seçimi (`CameraProfile.lenses`)
+
+Arka lensler: telefonun listelediği kameralar, listelemeyip özelliklerini verdiği kimlikler (0–9
+denenir, kamera raporundaki gibi) ve mantıksal çok-kameraların arkasındaki fiziksel lensler (mantıksal
+kamera üzerinden `setPhysicalCameraId` ile). Görüş açısı ana lense göre `odak / sensör genişliği`
+oranından hesaplanır (geniş açı <1, tele >1). Profil (4K60 vb.) seçilen lensin akış tablosundan
+seçilir. Listelenmeyen bir lens açılmazsa (`openCamera` hatası ya da oturum kurulamaması, hiç kare
+gelmeden) uygulama ana lense döner. Odak uzaklığı (`focalPx`) her lensin kendi değerleridir; jiroskop,
+perspektif ve rolling shutter buna göre çalışır.
+
+### Hibrit zoom (`HybridZoom`, `ZoomMap`)
+
+Çoklu lens (mantıksal çok-kamera, Honor 200 Pro'da kamera 4: ana + geniş + tele) seçiliyken kamera
+zoom oranı kırpmaya göre bir lens merdiveninden seçilir: **ana** (1x) ve **tele** (tele lensin ana
+lense göre görüş açısı, 0.1 yukarı yuvarlanmış; ~3x). HAL oranla birlikte lensi değiştirir. Uçak
+uzaklaştıkça teleye, yaklaştıkça ana lense geçilir; kırpma her zaman onu gören en uzun lensin gerçek
+pikselleriyle dolar. Geniş açı merdivende yok (v0.1.33): kendi ölçeği ve güçlü distorsiyonu
+geçişleri görünür kılıyordu; merdiven kodu (`HybridZoom`) istenirse daha çok basamağı destekler. Geçiş kesintisiz olsun diye:
+
+- Takip, kadraj, stabilizasyon, jiroskop ve perspektif **referans uzayda** çalışır: merdivenin en
+  geniş basamağının görüntüsü (hibrit kapalıyken kamera zoom kaydırıcısınınki), `focalPx` da onun.
+  Her karenin kendi zoom oranı capture result'tan (`CONTROL_ZOOM_RATIO`, zaman damgasıyla eşlenir;
+  `CameraController.zoomAt`) okunur ve kare `ZoomMap` (merkez etrafında `zoom` kat ölçek) ile
+  referans uzaya yerleştirilir. Lens değişse bile yörünge ve kilit sürekli kalır.
+- **Analiz her lensin kendi çözünürlüğünde**: analiz görüntüsü (640 px) karenin referans uzayda
+  kapladığı pencereyi gösterir (`LumaFrame.originX/Y`, `scale`, `toSource` / `toAnalysis`); telede
+  aynı uçak analizde ~6.5 kat büyük. Takipçinin şablonu pencere ölçeği değişince yeniden örneklenir
+  (`TemplateTracker.rescale`); sinir ağının tam kare çalışması ve yakınlaştırılmış bölgeleri
+  (`DetectionPlanner` görünüm penceresi) de o lensin karesinde. Görsel hareket tahmini (jiroskopsuz)
+  ardışık görüntüleri piksel piksel karşılaştırdığından hibrit zoom yalnız jiroskopla açılır.
+- Kayıt (halka tampon) ve çıkış referans uzayda; karenin kapsamadığı yer siyahtır (`inImage` maskesi).
+  Kadraj (`FramingController.visible`) kırpmayı görünen bölgede tutar, look-ahead yolu her kare için
+  `capture ∩ visible` ile sınırlanır, perspektif düzeltmesi yalnız geçerli bölgeye sığar, gökyüzü
+  dedektörü kenara değen lekeleri, pozometre siyah kısmı yok sayar.
+- **Sürekli kamera zoomu** (v0.1.34, telefonun kendi kamerası gibi): kamera zoom oranı kırpmayı
+  izler: oran = kırpmayı `HEADROOM` (1.35) payıyla (merkez dışındaysa ona göre) içine alan en büyük
+  oran. Ana lens önce kendi (sensör) zoomuyla yakınlaşır, telefoto oranının 0.9 katında (2.7x)
+  tutulur (HAL'ın geçiş noktasında gidip gelmesin); kırpma telefotonun görüşüne payıyla 0.3 s sığınca
+  telefotoya (≥3x) geçilir, %10 payla sığmadığı anda gecikmesiz ana lense dönülür; her lenste en az
+  1 s. İstekler %0.3 adımlarla en fazla ~30/s (parmakla zoom gibi; v0.1.34'teki %2 / 10 Hz adımlar
+  düşük kare hızlı zoom gibi görünüyordu); lens değişimi hemen gider. Capture result'ı kareden sonra
+  gelen bir kare önceki oranla halka tampona yazılır, çıkışta kendi oranıyla yeniden eşlenir
+  (`YuvRing.remap`: saklanan akış bölgesi aynı, referans uzaydaki yeri düzeltilir), kayıtta adım olmaz. Her kare kendi oranıyla
+  eşlendiği için oran nasıl değişirse değişsin görüntü sürekli kalır. Önceki sürüm 1x → 3x tek adım
+  atıyordu.
+- Telefoto ~4x kırpma zoomundan (`3 × 1.35`) kullanılır; hibrit açılınca otomatik zoom sınırları
+  buna göre ayarlanır.
+- Lens değişiminde enstantane önceliği diyafram farkını telafi eder: hibrit zoom'un istediği
+  değişimde aynı istekte, HAL'ın kendiliğinden yaptığında ilk karesinde (`onLensChanged`).
+- Doğrulanmamış kilit: sinir ağı yakından bakıp uçak görmediği sürece 2.5 s tutulan kilit de
+  kadrajlanır ve zoom yapılır (`TrackerConfig.trustAfterNs`); uzak uçak dedektör için çok küçük
+  kaldığında zoom uzun süre geniş kalıyordu. Durum satırı beklerken "doğrulanıyor: henüz zoom yok"
+  gösterir.
+- Kırpma zoomu ve otomatik zoom sınırları **ana lense göre** gösterilir (telefonun kamerası gibi:
+  0.4x geniş açının tamamı); kaydırıcılar referans uzayın tüm karesinden 10x'e kadar.
+- Zoom isteğinden sonraki 0.5 s içinde sonucu henüz gelmemiş kare 12 ms'ye kadar bekletilir (yanlış
+  oranla tek kare bile sıçrama olurdu). Zoom oranını bildirmeyen HAL'de istenen oran kullanılır.
+- Geniş önizleme kameranın o anki karesini gösterir (lens değişince görüntü değişir), kutular ve
+  dokunma ona çevrilir. Durum satırının başında etkin lens: `TELE 2.6x (3)` (fiziksel kamera
+  kimliği; HAL bildirmezse orandan tahmin).
+
+Bilinen sınırlar: iki lens arasındaki küçük hizalama farkı (paralaks, HAL kalibrasyonu) ve renk /
+pozlama farkı geçişte görünebilir; ölçmek için kayıt günlüğünde `cam.phys` / `cam.zoom` her kare,
+`live.z` ve `set.ladder` / `refZoom` var. Takipçinin rolling shutter modeli ve piksel eşikleri
+(`TrackerConfig.forSource`) referans uzayda; geniş açı referansında uzak hedef için daha temkinli.
+
+### Lens kalibrasyonu (`LensModel`, `LensCalibrator`)
+
+Telefon üçüncü parti uygulamalara lens distorsiyonu vermiyor (`LENS_DISTORTION` hep sıfır, HAL düzeltmesi
+yok) ve çoklu kameranın zoom oranı her lensin gerçek ölçeğiyle örtüşmeyebilir: Honor 200 Pro'da geniş
+açının iç parametresi (fx 1760.8) ana lense göre ~0.62x verirken zoom aralığı 0.4x'ten başlıyor. Yanlış
+ölçek jiroskop düzeltmesini, düzeltilmemiş distorsiyon kırpmanın kare içinde kaymasını "bükülme" olarak
+gösterir. Bu yüzden her lens telefonda ölçülür:
+
+- Model: merkez odağı `kappa × zoom` (akış px) ve tek parametreli radyal distorsiyon
+  `r_d = atan(a·r_u)/a` (a = 0 iğne delikli, 1 eşit uzaklıklı balıkgözü; arası geniş açının fıçı
+  distorsiyonu, her a için monoton).
+- Ölçüm: jiroskoplu çekimde her 4 karede bir çift karede arka plan noktaları (Shi-Tomasi + piramidal
+  LK, hedef hariç) eşlenir; noktaların lensin kendi piksellerindeki konumu ve iki kare arasındaki
+  dönüş (jiroskop: eksen eğimi + roll) bir örnek olur. Dönüşün gerçek 3B ışın dönüşü olarak modeli
+  (`kappa`, `a`) ızgara aramasıyla, Huber kaybıyla (kendi hareket eden cisimler önemsiz) uydurulur
+  (`LensCalibrator.fit`, arka plan thread'i). 1500 ve 3000 örnekteki iki uyum anlaşınca lens kalibre
+  sayılır, değer saklanır (akış genişliğine oranla, lens anahtarı `kamera/fiziksel`), uyarı gösterilir.
+  Kayıt sırasında gelirse kayıt bitince uygulanır.
+- Kullanım: kare referans uzaya gerçek merkez ölçeğiyle (`kappa·z / f_ref`) yerleşir, jiroskop ve
+  perspektif odağı referans lensin gerçek odağıdır, kamera dokusu tüm shader'larda düzeltilmiş
+  (iğne delikli) olarak örneklenir (`FrameRenderer.setLens`, `lensPoint`); önizleme, analiz, kayıt
+  hepsi düz çizgili görüntüyü görür.
+- Durum satırı ölçüm sürerken `kalibrasyon GENİŞ %40` gösterir; dokulu bir manzarada (bina, ağaç,
+  bulut) telefonu gezdirmek yeter. Lens düğmesine uzun basmak ölçümleri siler. Kamera raporunda
+  ve kayıt günlüğünde (`lens` satırları) değerler var.
+
+İlk ölçüm (Honor 200 Pro, kamera 4, geniş açı `4/2`): 0.4x'te merkez odağı 1774 px, a = 0.31; lensin
+kendi iç parametresi 1760.8 px (akış genişliğinde) ile %0.7 uyumlu. Yani telefonun 0.4x dediği geniş
+açı gerçekte 0.67x ve belirgin fıçı distorsiyonlu; eski 0.4x varsayımı geniş açıda jiroskop
+düzeltmesini 1.7 kat yanlış ölçekliyordu. Bu yüzden ölçülmemiş lensler için önsel değer artık her
+fiziksel lensin kendi iç parametresi: geniş açı tüm sensörüyle en düşük oranda, ana lens 1x'te,
+telefoto oranın söylediği ölçekte (`MainActivity.physicalPriors`). Hibrit zoom basamakları, kırpma
+zoomu göstergeleri ve otomatik zoom sınırları da lens modellerinden gelen gerçek ölçekleri kullanır
+(geniş 0.67x, tele ~3x), oranları değil.
+
+Lens geçişinde parlaklık: enstantane önceliğinde ISO / süre, yeni lensin diyafram farkı kadar
+(1/f²) zoom isteğiyle aynı istekte değiştirilir; eski lensten hâlâ gelen karelerin ölçümü 1.5 s
+boyunca yok sayılır (`CameraController.updateForLens`).
+
+Sentetik doğrulama (`LensCalibratorTest`): HAL'ın 0.4x dediği (1114 px) ama gerçekte 1650 px merkez
+odaklı, a = 0.6 bir geniş açı %10 aykırı noktayla %1 / ±0.05 içinde bulunuyor; iğne delikli lens
+iğne delikli kalıyor.
 
 ## Gerçek video testleri
 
@@ -341,11 +620,18 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
 - [ ] **Rolling shutter yönü**: hızlı yatay pan'da dikey çizgiler (direk, bina kenarı) çıkışta dik
       kalmalı. Eğiklik *arttıysa* okuma yönü ters (`RollingShutter.readoutDirection`); cihaz
       `SENSOR_ROLLING_SHUTTER_SKEW` bildirmiyorsa (0) düzeltme kapalı kalır.
+- [ ] **Perspektif**: bir binaya kilitlenip telefonu yavaşça sağa sola çevirince bina yamuklaşmamalı.
+      Ters yönde yamukluk (abartılı düzeltme) görülürse `focalPx` küçük hesaplanıyor.
 - [ ] **Yakınlaştırılmış tespit**: durum satırındaki NN süresi 320x320 bölgede tam kareden farklı
       olmamalı; uzak uçakta takip kutusunun yeşil (onaylı) kalması.
 - [ ] Cihazın 4K60 profili seçiliyor mu (durum satırı `3840x2160@60 → 1920x1080@60`)?
 - [ ] Render ≥ 59 fps, analiz < 10 ms, NN süresi (durum satırında).
 - [ ] Kayıt: ses/görüntü senkronu, 60 fps sabit kare hızı, dosya galeride görünüyor mu.
+- [ ] Kayıt günlüğü `Download/OpenTrack`'te videoyla aynı adla çıkıyor mu; `summarize.py` `out`
+      kare hızını videoyla aynı ve `dropped: 0` gösteriyor mu.
+- [ ] Lens düğmesi: geniş açı açılıyor mu, açılmıyorsa ana lense dönüş mesajı geliyor mu.
+- [ ] Hibrit zoom (Lens: çoklu): kırpma zoomu eşikleri geçince durum satırı `GENİŞ 0.4x` → `ANA 1.0x`
+      → `TELE 2.6x` oluyor mu, geçişte kadraj yerinde kalıyor mu, takip kopuyor mu.
 
 ## Yol haritası
 
@@ -359,9 +645,15 @@ katmanı gerçek cihazda denenmedi. İlk cihaz testinde kontrol edilecekler:
    hedef çevresinden tam çözünürlükte bir luma yaması üzerinde yapılırsa küçük hedeflerde alt-piksel
    hassasiyet ve daha az kayma (şu an 640x360 analiz görüntüsünde).
 4. **Asenkron geri okuma (PBO)** ile render thread'deki `glReadPixels` beklemesini kaldırmak.
-5. **Uçak odaklı model**: uzak/küçük uçak veri setiyle eğitilmiş dedektör, sonra helikopter, drone,
-   kuş gibi sınıflar.
-6. **Hibrit zoom**: otomatik zoom kırpma sınırına dayanınca lens zumunu kontrollü değiştirmek.
+5. **Uçak odaklı model**: ilk sürüm uygulamada (`DetectorModel.AIRCRAFT`, Colab `small`, 25 epoch,
+   14 bin görüntü; doğrulama AP50 0.56, küçük nesne APs 0.07). SOLOTÜRK (9 video, canlı ROI, hibrit)
+   eşik 0.5'te: doğru hedefte 0.850 (COCO 0.851), yanlış 0.105 (0.097), kaçırma 0.044 (0.051), takipte
+   0.739 (0.704), iyi kadraj 0.752 (0.731); kullanıcı videosu eşit. Eşik 0.35'te daha çok takip
+   (0.768) ama daha çok yanlış kilit (0.130). Yalnız sinir ağı yine yetmiyor (doğru 0.56): uzak uçak
+   için gökyüzü dedektörü gerekli. Sonraki: `medium` veri, SOLOTÜRK tipi karelerin (video bazında
+   ayrılmış) eğitime eklenmesi, helikopter/drone test videoları.
+6. **Hibrit zoom**: ilk sürüm uygulamada (yukarıda). Sonraki: geçişteki lens hizalama farkını
+   görüntüden ölçüp düzeltmek, iki lensin pozlama/renk eşleşmesi.
 7. **ADS-B entegrasyonu**: yakındaki uçakların konumundan hedefin ekrandaki yerini tahmin edip
    ön-kilit, kaybolunca arama yönü.
 8. Eşzamanlı ham 4K kayıt, 10-bit HEVC / log profil, tam manuel pozlama arayüzü.

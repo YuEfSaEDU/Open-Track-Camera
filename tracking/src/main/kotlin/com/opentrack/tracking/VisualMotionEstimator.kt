@@ -94,6 +94,21 @@ class VisualMotionEstimator(
         return step
     }
 
+    /**
+     * Background feature correspondences from [a] to [b] (analysis px), e.g. for lens
+     * calibration; [guess]: the expected shift (analysis px). Leaves the pose history alone.
+     */
+    fun correspondences(a: LumaFrame, b: LumaFrame, exclude: Box? = null, guess: Vec2 = Vec2.ZERO): List<Pair<Vec2, Vec2>> {
+        val pa = Pyramid(a, levels)
+        val pb = Pyramid(b, levels)
+        val out = ArrayList<Pair<Vec2, Vec2>>()
+        for (f in detectFeatures(pa, exclude?.let { a.toAnalysis(it) })) {
+            val d = lucasKanade(pa, pb, f, guess) ?: continue
+            out += f to (f + d)
+        }
+        return out
+    }
+
     override fun isReliableAt(timestampNs: Long): Boolean = synchronized(lock) {
         if (count == 0) return true
         val size = times.size
